@@ -92,7 +92,8 @@ class ClientPortal:
     @property
     def url(self) -> str:
         """Public portal URL."""
-        return f"http://{self.host}:{self.port}"
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"http://{host}:{self.port}"
 
     @property
     def is_running(self) -> bool:
@@ -112,8 +113,21 @@ class ClientPortal:
         """Start the portal (idempotent); return the URL."""
         if self.is_running:
             return self.url
+        if self.host not in ("127.0.0.1", "localhost", "::1"):
+            raise RuntimeError(
+                "Client portal requires a loopback bind; it has no remote "
+                "authentication."
+            )
         handler = self._make_handler()
-        self._server = ThreadingHTTPServer((self.host, self.port), handler)
+        server_type = ThreadingHTTPServer
+        if self.host == "::1":
+            import socket
+
+            class IPv6Server(ThreadingHTTPServer):
+                address_family = socket.AF_INET6
+
+            server_type = IPv6Server
+        self._server = server_type((self.host, self.port), handler)
         self.port = self._server.server_address[1]
         self._thread = threading.Thread(
             target=self._server.serve_forever,
@@ -360,7 +374,8 @@ class ClientPortal:
                 )
             elif operation == "record_get":
                 response = client.data_request(
-                    "record_get", {"record_id": params.get("record_id")}
+                    "record_get",
+                    {"namespace": params.get("namespace"), "key": params.get("key")},
                 )
             elif operation == "file_metadata":
                 response = client.data_request(
@@ -415,11 +430,20 @@ class ClientPortal:
                 self._require_online(client)
                 assert client is not None
                 response = client.service_request(
-                    "agent", "infer", {"prompt": prompt.strip()}
+                    "agent",
+                    "infer",
+                    {"device_id": client.device_id, "prompt": prompt.strip()},
                 )
             except Exception as exc:
                 raise ConnectionError(f"host offload failed: {exc}") from exc
             payload = response.get("payload", {}) if isinstance(response, dict) else {}
+            if not isinstance(payload, dict) or payload.get("success") is False:
+                detail = (
+                    payload.get("error", "invalid response")
+                    if isinstance(payload, dict)
+                    else "invalid response"
+                )
+                raise ConnectionError(f"host offload failed: {detail}")
             return {
                 "executed": "host",
                 "model_id": None,
@@ -494,6 +518,53 @@ class ClientPortal:
 
     # -- HTTP plumbing ------------------------------------------------------
 
+    def _check_portal_host(self, handler: BaseHTTPRequestHandler) -> None:
+        """Validate the authority for reads as well as writes (DNS rebinding)."""
+        authority = handler.headers.get("Host", "")
+        try:
+            parsed = urlparse("//" + authority)
+            if (
+                parsed.hostname not in ("127.0.0.1", "localhost", "::1")
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+                or (parsed.port or 80) != self.port
+            ):
+                raise ValueError("Invalid portal Host header")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid portal Host header") from exc
+
+    def _check_portal_origin(self, handler: BaseHTTPRequestHandler) -> None:
+        """Require JSON, a custom request header, and the exact local origin."""
+        self._check_portal_host(handler)
+        content_type = (
+            handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        )
+        if content_type != "application/json":
+            raise ValueError("Content-Type must be application/json")
+        origin = handler.headers.get("Origin")
+        if origin:
+            try:
+                parsed = urlparse(origin)
+                authority = urlparse("//" + handler.headers.get("Host", ""))
+                if (
+                    parsed.scheme != "http"
+                    or parsed.hostname != authority.hostname
+                    or (parsed.port or 80) != (authority.port or 80)
+                    or parsed.username is not None
+                    or parsed.password is not None
+                    or parsed.path
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise ValueError("Origin must match the portal origin")
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Invalid Origin header") from exc
+        if not handler.headers.get("X-Core-Request"):
+            raise ValueError("Missing required header: X-Core-Request")
+
     def _make_handler(self):
         portal = self
 
@@ -531,13 +602,15 @@ class ClientPortal:
                 except (TypeError, ValueError):
                     length = 0
                 if length <= 0 or length > MAX_BODY_BYTES:
-                    return {}
+                    raise ValueError("Invalid JSON body length")
                 try:
                     raw = self.rfile.read(length)
                     parsed = json.loads(raw.decode("utf-8"))
-                    return parsed if isinstance(parsed, dict) else {}
-                except Exception:
-                    return {}
+                    if not isinstance(parsed, dict):
+                        raise ValueError("JSON body must be an object")
+                    return parsed
+                except Exception as exc:
+                    raise ValueError("Invalid JSON body") from exc
 
             def _query(self) -> dict:
                 from urllib.parse import parse_qsl
@@ -546,6 +619,13 @@ class ClientPortal:
                 return dict(parse_qsl(_urlparse(self.path).query or ""))
 
             def do_GET(self) -> None:
+                try:
+                    portal._check_portal_host(self)
+                except ValueError as exc:
+                    self._send_json(
+                        envelope(None, ok=False, error=str(exc)), status=403
+                    )
+                    return
                 path = urlparse(self.path).path.rstrip("/") or "/"
                 try:
                     if path == "/":
@@ -563,7 +643,7 @@ class ClientPortal:
                     elif path == "/api/network":
                         self._send_json(envelope(portal.api_network()))
                     elif path == "/api/rescs":
-                        query = self._read_json() or self._query()
+                        query = self._query()
                         self._send_json(envelope(portal.api_rescs(
                             operation=query.get("operation", "records_list"),
                             **{k: v for k, v in query.items() if k != "operation"},
@@ -585,6 +665,20 @@ class ClientPortal:
 
             def do_POST(self) -> None:
                 path = urlparse(self.path).path.rstrip("/") or "/"
+                mutation_paths = {
+                    "/api/ai/request",
+                    "/api/reconnect",
+                    "/api/location",
+                    "/api/devices/location",
+                }
+                if path in mutation_paths:
+                    try:
+                        portal._check_portal_origin(self)
+                    except ValueError as exc:
+                        self._send_json(
+                            envelope(None, ok=False, error=str(exc)), status=403
+                        )
+                        return
                 try:
                     if path == "/api/ai/request":
                         body = self._read_json()
@@ -658,7 +752,12 @@ textarea{width:100%;min-height:70px}
 const SECTIONS=[["dashboard","Dashboard"],["devices","Devices"],["rescs","R.E.S.C.S."],
  ["services","Services"],["ai","AI"],["network","Network"],["session","Session"],["settings","Settings"]];
 let active="dashboard";
-async function api(path,opts){const r=await fetch(path,opts);return r.json();}
+async function api(path,opts={}){
+ const headers=new Headers(opts.headers||{});
+ if((opts.method||"GET").toUpperCase()!=="GET"){
+  headers.set("Content-Type","application/json");headers.set("X-Core-Request","true");
+ }
+ const r=await fetch(path,{...opts,headers});return r.json();}
 function esc(v){return String(v??"").replace(/&/g,"&amp;").replace(/</g,"&lt;");}
 function badge(t,c){return `<span class="badge ${c}">${esc(t)}</span>`;}
 function table(rows){if(!rows||!rows.length)return "<p><i>none</i></p>";

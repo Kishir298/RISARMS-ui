@@ -174,7 +174,7 @@ def test_unknown_message_yields_device_error(tmp_path):
 
 def test_malformed_frame_rejected_by_client_framing(tmp_path):
     # Client-side framing rejects empty/oversize payloads before send.
-    client = _make_client(5000, tmp_path / "d.json")
+    _make_client(5000, tmp_path / "d.json")
     assert json.loads(json.dumps({"message_type": "DEVICE_ERROR"}))["message_type"] == "DEVICE_ERROR"
     assert struct.calcsize("!I") == 4
     assert uuid.uuid4() != uuid.uuid4()

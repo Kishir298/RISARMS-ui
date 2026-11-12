@@ -31,10 +31,12 @@ import argparse
 import getpass
 import json
 import os
+import platform
 import socket
 import ssl
 import struct
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -161,22 +163,38 @@ def _redact_token_for_display(token: str | None) -> str:
     return f"ACTIVE ({token[:4]}...{token[-4:]})"
 
 
-def _recv_exact(sock: socket.socket, n: int) -> bytes:
+def _recv_exact(sock: socket.socket, n: int, deadline: float | None = None) -> bytes:
     buf = b""
     while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DeviceClientError("Timed out receiving a complete frame.")
+            sock.settimeout(remaining)
+        try:
+            chunk = sock.recv(n - len(buf))
+        except socket.timeout:
+            # A read timeout must not discard a partially received frame.
+            # Surface a timeout when nothing has arrived yet; otherwise keep
+            # retrying until the frame completes or the deadline is reached.
+            if not buf or deadline is None or time.monotonic() >= deadline:
+                raise
+            continue
         if not chunk:
             raise DeviceClientError("Connection closed by C.O.R.E. host.")
         buf += chunk
     return buf
 
 
-def _recv_frame(sock: socket.socket) -> dict:
-    header = _recv_exact(sock, HEADER_SIZE)
+def _recv_frame(sock: socket.socket, deadline: float | None = None) -> dict:
+    if deadline is None:
+        timeout = sock.gettimeout()
+        deadline = time.monotonic() + (timeout if timeout is not None else 10.0)
+    header = _recv_exact(sock, HEADER_SIZE, deadline)
     (length,) = struct.unpack("!I", header)
     if length <= 0 or length > MAX_FRAME_SIZE:
         raise DeviceClientError("Invalid inbound frame size.")
-    data = _recv_exact(sock, length)
+    data = _recv_exact(sock, length, deadline)
     try:
         message = json.loads(data.decode("utf-8"))
     except Exception as exc:
@@ -317,7 +335,12 @@ class CoreDeviceClient:
                 "Remembered device file is missing required fields "
                 "(device_id, host, port)."
             )
-        client = cls(device_file=path, **state)
+        try:
+            client = cls(device_file=path, **state)
+        except (TypeError, ValueError) as exc:
+            raise DeviceClientError(
+                "Remembered device file has invalid values."
+            ) from exc
         if (
             isinstance(remembered_identity, str)
             and remembered_identity
@@ -535,7 +558,11 @@ class CoreDeviceClient:
         raw.settimeout(self.timeout)
         sock: socket.socket = raw
         if self.use_tls:
-            ctx = self._build_tls_context()
+            try:
+                ctx = self._build_tls_context()
+            except Exception as exc:
+                raw.close()
+                raise DeviceClientError(f"TLS setup failed: {exc}") from exc
             try:
                 sock = ctx.wrap_socket(raw, server_hostname=self.host)
             except Exception:
@@ -843,7 +870,7 @@ class CoreDeviceClient:
         if not self.is_logged_in:
             raise DeviceClientError("Login required before reconnect.")
         old_id = self._connection_id
-        resp = self.connect()
+        self.connect()
         reg = self.register()
         if old_id is not None and self._connection_id == old_id:
             raise DeviceClientError("Reconnect did not yield a new connection_id.")
@@ -897,7 +924,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stable human-readable join name (generated once if omitted).",
     )
     parser.add_argument("--device-type", default="generic")
-    parser.add_argument("--platform", default="mac")
+    parser.add_argument("--platform", default={"Darwin": "mac", "Windows": "windows", "Linux": "linux"}.get(platform.system(), "unknown"))
     parser.add_argument("--capabilities", default="", help="Comma-separated list.")
     parser.add_argument("--token", default=None, help="Login token (else prompted).")
     parser.add_argument("--no-tls", action="store_true", help="Use plaintext (localhost tests only; never for LAN).")
@@ -1039,7 +1066,7 @@ def main(argv: list | None = None) -> int:
     try:
         print("Connecting to C.O.R.E...")
         portal = None
-        hs = client.connect()
+        client.connect()
         print("TLS established" if client.use_tls else "PLAINTEXT (no TLS) — localhost only")
         print("Authentication successful")
         print("Session established")

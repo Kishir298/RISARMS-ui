@@ -73,6 +73,13 @@ def _get(portal, path, *, method="GET", body=None):
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
+        headers["X-Core-Request"] = "true"
+        if method == "POST":
+            from urllib.parse import urlparse
+
+            parsed = urlparse(portal.url)
+            headers["Origin"] = portal.url
+            headers["Host"] = parsed.netloc
     request = urllib.request.Request(
         portal.url + path, data=data, headers=headers, method=method
     )
@@ -120,10 +127,18 @@ def test_offline_rescs_and_ai_request(offline_portal):
     status, body = _get(portal, "/api/rescs?operation=records_list")
     assert status == 200
     assert "C.O.R.E. HOST OFFLINE" in json.dumps(body["data"])
+    from urllib.parse import urlparse
+
+    parsed = urlparse(portal.url)
     request = urllib.request.Request(
         portal.url + "/api/ai/request",
         data=json.dumps({"prompt": "hi"}).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "X-Core-Request": "true",
+            "Origin": portal.url,
+            "Host": parsed.netloc,
+        },
         method="POST",
     )
     try:

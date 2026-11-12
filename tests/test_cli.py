@@ -15,11 +15,16 @@ def test_help_exits_zero(capsys):
 
 
 def test_parser_defaults():
+    import platform
+
     args = build_parser().parse_args([])
     assert args.no_tls is False
     assert args.insecure is False
     assert args.device_type == "generic"
-    assert args.platform == "mac"
+    expected = {"Darwin": "mac", "Windows": "windows", "Linux": "linux"}.get(
+        platform.system(), "unknown"
+    )
+    assert args.platform == expected
 
 
 def test_remember_saves_without_secrets(tmp_path):
