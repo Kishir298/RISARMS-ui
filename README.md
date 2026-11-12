@@ -1,4 +1,9 @@
-# C.O.R.E.-CLIENT — External-Device Client
+# C.O.R.E.-CLIENT — External-Device Client (LEGACY)
+
+> **Legacy checkout:** the canonical C.O.R.E. client now lives in
+> `CORE/CORE-CLIENT` (desktop app, local inference, model support, and the
+> newest portal hardening). This standalone repository is retained for
+> historical protocol compatibility only. New work belongs in the bundle.
 
 **Version:** `0.4.0` (protocol-compatible with C.O.R.E.-HOST v0.4.0; wire negotiates 0.3.0–0.4.0)
 **Status:** **Implementation Complete · Physical LAN Validation Pending**

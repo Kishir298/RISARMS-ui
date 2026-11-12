@@ -69,22 +69,16 @@ def ollama_available(host: str = "127.0.0.1", port: int = 11434) -> bool:
 
 
 def find_model(models: list[dict], model_id: str) -> dict | None:
-    """Find an installed model by id, treating an omitted tag as :latest.
+    """Find an installed model by exact id match (Ollama tags carry suffixes).
 
-    A tagged request may match a quantized variant (``model:30b`` ->
-    ``model:30b-instruct-q4_K_M``). An untagged request only matches the
-    explicit ``:latest`` tag, never an arbitrary older/newer version.
+    An omitted tag is treated as the explicit ``:latest`` tag. Tagged
+    requests must match exactly; prefix matching could silently select a
+    different quantization or variant than the caller asked for.
     """
-    tagged = ":" in model_id
-    wanted = model_id if tagged else f"{model_id}:latest"
+    wanted = model_id if ":" in model_id else f"{model_id}:latest"
     for entry in models:
         name = entry.get("name", "") if isinstance(entry, dict) else ""
-        if not isinstance(name, str):
-            continue
-        if tagged:
-            if name == wanted or name.startswith(wanted):
-                return entry
-        elif name == wanted:
+        if isinstance(name, str) and name == wanted:
             return entry
     return None
 

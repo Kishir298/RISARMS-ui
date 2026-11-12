@@ -105,10 +105,16 @@ def test_unknown_model_is_unknown():
     assert result["state"] == LOCAL_AI_UNKNOWN
 
 
-def test_find_model_prefix_match():
+def test_find_model_requires_exact_tag():
     installed = [{"name": "qwen3-coder:30b-instruct-q4_K_M"}]
-    assert find_model(installed, "qwen3-coder:30b") is not None
+    assert find_model(installed, "qwen3-coder:30b") is None
     assert find_model(installed, "qwen3:14b") is None
+    assert find_model(installed, "qwen3-coder:30b-instruct-q4_K_M") == installed[0]
+
+
+def test_find_model_untagged_means_latest():
+    assert find_model([{"name": "model:old"}], "model") is None
+    assert find_model([{"name": "model:latest"}], "model") == {"name": "model:latest"}
 
 
 def test_detect_capabilities_never_raises():
