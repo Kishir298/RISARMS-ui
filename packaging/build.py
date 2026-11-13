@@ -18,6 +18,10 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import installers  # noqa: E402  (local packaging helper)
+
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 VERSION = "0.6.0"
@@ -79,11 +83,46 @@ def archive(path: Path, platform_tag: str) -> Path:
     return destination
 
 
+def native_installers(app_dir: Path, app_bundle: Path | None, machine: str) -> list:
+    """Produce real platform installers; report what could not be built."""
+    built = []
+    if sys.platform == "darwin" and app_bundle is not None:
+        built.append(installers.build_dmg(
+            app_bundle, VERSION, DIST / f"RISARMS-Portal-{VERSION}-macos-{machine}.dmg"))
+    elif sys.platform == "win32":
+        built.append(installers.build_windows_exe(
+            app_dir, VERSION, DIST / f"RISARMS-Portal-{VERSION}-windows-{machine}-setup.exe"))
+        built.append(installers.build_windows_msi(
+            app_dir, VERSION, DIST / f"RISARMS-Portal-{VERSION}-windows-{machine}.msi"))
+    else:
+        arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(machine, machine)
+        built.append(installers.build_deb(
+            app_dir, VERSION, arch, DIST / f"risarms-portal_{VERSION}_{arch}.deb"))
+        built.append(installers.build_appimage(
+            app_dir, VERSION, arch, DIST / f"RISARMS-Portal-{VERSION}-linux-{machine}.AppImage"))
+    produced = [item for item in built if item is not None]
+    skipped = len(built) - len(produced)
+    if skipped:
+        print(f"{skipped} native installer(s) skipped: the packaging tool is not installed.")
+    return produced
+
+
 def main() -> int:
     try:
         import PyInstaller  # noqa: F401
     except ImportError:
         print("PyInstaller is required: pip install -e '.[package]'", file=sys.stderr)
+        return 2
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        # Never ship a bundle that cannot open its own window.
+        print(
+            "Tk is required to package the desktop application. On macOS install "
+            "python-tk for your Python, on Debian/Ubuntu install python3-tk. "
+            "No artifact was produced.",
+            file=sys.stderr,
+        )
         return 2
     run(sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(ROOT / "packaging" / "risarms-ui.spec"))
     machine = platform.machine().lower() or "unknown"
@@ -105,12 +144,17 @@ def main() -> int:
         if not target.exists():
             raise SystemExit("Expected Linux application directory was not produced.")
         destination = archive(target, f"linux-{machine}")
-    digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+    app_bundle = DIST / "RISARMS Portal.app" if sys.platform == "darwin" else None
+    app_dir = DIST / "RISARMS-Portal"
+    artifacts = [destination] + native_installers(app_dir, app_bundle, machine)
     sums = DIST / "SHA256SUMS"
-    with sums.open("a", encoding="utf-8") as file:
-        file.write(f"{digest}  {destination.name}\n")
-    print(f"Artifact: {destination}")
-    print(f"SHA-256: {digest}")
+    sums.write_text("", encoding="utf-8")
+    for artifact in artifacts:
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        with sums.open("a", encoding="utf-8") as file:
+            file.write(f"{digest}  {artifact.name}\n")
+        print(f"Artifact: {artifact}")
+        print(f"SHA-256: {digest}")
     return 0
 
 
