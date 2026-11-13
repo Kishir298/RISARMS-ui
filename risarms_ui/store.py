@@ -29,6 +29,10 @@ class LocalStore:
           PRIMARY KEY(profile,service,key));
         CREATE TABLE IF NOT EXISTS files(id TEXT PRIMARY KEY,profile TEXT,name TEXT,path TEXT,remote_id TEXT,pending INTEGER);
         CREATE TABLE IF NOT EXISTS history(id TEXT PRIMARY KEY,profile TEXT,at REAL,source TEXT,prompt TEXT,output TEXT);
+        CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,profile TEXT NOT NULL,peer TEXT NOT NULL,
+          direction TEXT NOT NULL,body TEXT NOT NULL,created REAL NOT NULL,status TEXT NOT NULL,
+          remote_id TEXT,error TEXT);
+        CREATE INDEX IF NOT EXISTS messages_thread ON messages(profile,peer,created);
         ''')
         if "remote_role" not in {r[1] for r in self.db.execute("PRAGMA table_info(profiles)")}:
             self.db.execute("ALTER TABLE profiles ADD COLUMN remote_role TEXT DEFAULT 'local'")
@@ -153,3 +157,119 @@ class LocalStore:
     def file_ack(self, profile, identity, remote_id):
         with self.lock,self.db:
             self.db.execute("UPDATE files SET pending=0,remote_id=? WHERE profile=? AND id=?",(remote_id,profile,identity))
+
+    # ------------------------------------------------------------- messaging
+    def queue_message(self, profile, peer, body):
+        """Queue an outgoing message durably. Queued is not delivered."""
+        if not isinstance(body, str) or not body.strip():
+            raise ValueError("Write a message before sending.")
+        if len(body.encode()) > 16000:
+            raise ValueError("Messages are limited to 16000 bytes.")
+        if not isinstance(peer, str) or not peer.strip():
+            raise ValueError("Choose a recipient.")
+        identity = uuid.uuid4().hex
+        with self.lock, self.db:
+            self.db.execute(
+                "INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?)",
+                (identity, profile, peer.strip(), "out", body, time.time(), "queued", "", ""),
+            )
+        return identity
+
+    def messages(self, profile, peer=None):
+        query, params = "SELECT * FROM messages WHERE profile=?", [profile]
+        if peer:
+            query += " AND peer=?"
+            params.append(peer)
+        with self.lock:
+            return [dict(row) for row in self.db.execute(query + " ORDER BY created,id", params)]
+
+    def threads(self, profile):
+        with self.lock:
+            rows = self.db.execute(
+                """SELECT peer, MAX(created) AS last_at, COUNT(*) AS total
+                   FROM messages WHERE profile=? GROUP BY peer ORDER BY last_at DESC""",
+                (profile,),
+            ).fetchall()
+            results = []
+            for row in rows:
+                last = self.db.execute(
+                    "SELECT body FROM messages WHERE profile=? AND peer=? ORDER BY created DESC LIMIT 1",
+                    (profile, row["peer"]),
+                ).fetchone()
+                unread = self.db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE profile=? AND peer=? AND direction='in' AND status!='read'",
+                    (profile, row["peer"]),
+                ).fetchone()[0]
+                results.append({"peer": row["peer"], "last_at": row["last_at"],
+                                "last_body": last["body"] if last else "", "unread": unread})
+            return results
+
+    def pending_message_count(self, profile):
+        with self.lock:
+            return self.db.execute(
+                "SELECT COUNT(*) FROM messages WHERE profile=? AND direction='out' AND status='queued'",
+                (profile,),
+            ).fetchone()[0]
+
+    def flush_messages(self, profile, remote):
+        """Send queued messages once; failures stay queued for the next cycle.
+
+        The local id doubles as the idempotency key so a retry after a lost
+        response cannot duplicate a message on the server. A queued message is
+        never reported as delivered.
+        """
+        sent = 0
+        for row in self.messages(profile):
+            if row["direction"] != "out" or row["status"] != "queued":
+                continue
+            try:
+                result = remote.request(
+                    "POST", "/api/messages",
+                    {"recipient": row["peer"], "body": row["body"], "client_id": row["id"]},
+                    idempotency_key=row["id"],
+                )
+            except Exception as exc:
+                # Transport failures retry; explicit rejections are marked failed.
+                if getattr(exc, "status", 0) in (400, 403, 404):
+                    with self.lock, self.db:
+                        self.db.execute(
+                            "UPDATE messages SET status='failed',error=? WHERE profile=? AND id=?",
+                            (str(exc)[:500], profile, row["id"]),
+                        )
+                continue
+            with self.lock, self.db:
+                self.db.execute(
+                    "UPDATE messages SET status=?,remote_id=?,error='' WHERE profile=? AND id=?",
+                    (result.get("status", "sent"), result.get("id", ""), profile, row["id"]),
+                )
+            sent += 1
+        return sent
+
+    def record_incoming(self, profile, peer, rows):
+        """Cache server messages for one peer without duplicating them."""
+        added = 0
+        with self.lock, self.db:
+            for row in rows:
+                remote_id = str(row.get("id", ""))
+                if not remote_id:
+                    continue
+                exists = self.db.execute(
+                    "SELECT 1 FROM messages WHERE profile=? AND remote_id=?", (profile, remote_id)
+                ).fetchone()
+                if exists:
+                    continue
+                self.db.execute(
+                    "INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?)",
+                    ("srv-" + remote_id, profile, peer, "in", row.get("body", ""),
+                     float(row.get("created", time.time())), "read" if row.get("read") else "delivered",
+                     remote_id, ""),
+                )
+                added += 1
+        return added
+
+    def mark_thread_read(self, profile, peer):
+        with self.lock, self.db:
+            self.db.execute(
+                "UPDATE messages SET status='read' WHERE profile=? AND peer=? AND direction='in' AND status!='read'",
+                (profile, peer),
+            )
