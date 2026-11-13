@@ -30,13 +30,14 @@ from .pages.devices import DevicesPage
 from .pages.files import FilesPage
 from .pages.history import HistoryPage
 from .pages.home import HomePage
+from .pages.messages import MessagesPage
 from .pages.rescs import RescsPage
 from .pages.service_chat import ServiceChatPage
 from .pages.settings import SettingsPage
 from .pages.storage import StoragePage
 from .pages.tasks import TasksPage
 from .paths import config_directory, data_directory, preferences_file, server_url_file
-from .remote import sync_records
+from .remote import sync_files, sync_records
 from .security.credentials import CredentialStore
 from .store import LocalStore
 from .theme import apply_theme, palette
@@ -46,6 +47,7 @@ _LOG = logging.getLogger(__name__)
 
 NAVIGATION = (
     ("home", "Home", HomePage, False, ""),
+    ("messages", "Messages", MessagesPage, False, "Direct messages between approved accounts"),
     ("asis", "ASIS", lambda parent, app: ServiceChatPage(parent, app, "asis", "ASIS Assistant"), False, "Chat and general assistance"),
     ("ascs", "ASCS", lambda parent, app: ServiceChatPage(parent, app, "ascs", "ASCS Coding", coding=True), False, "Coding agent — owner account"),
     ("tiviss", "TIVISS", lambda parent, app: ServiceChatPage(parent, app, "tiviss", "TIVISS Vision", coding=False), False, "Vision and infrastructure — owner account"),
@@ -572,6 +574,16 @@ class App:
         message = event.get("message") or event.get("text") or ""
         if kind == "session.revoked":
             self._set_status("Session revoked by the server. Sign in again.")
+        elif kind == "connection.restored":
+            # Resume eligible synchronization as soon as the channel is back.
+            self._set_status(f"Reconnected · {self.connection.server}")
+            self.root.after(250, self._sync_if_needed)
+        elif kind == "session.refreshed":
+            profile = event.get("profile") or {}
+            if profile.get("role"):
+                self._update_role_visibility()
+        elif kind == "message.received":
+            self.refresh_current()
         elif kind in ("notification", "announcement", "account.approved", "access.approved"):
             if message:
                 self._set_status(message[:300])
@@ -655,26 +667,68 @@ class App:
         if self.closing:
             return
         try:
-            if (
-                self.profile
-                and self.connection.state is ConnectionState.ONLINE
-                and self.preferences.get("auto_sync", True)
-                and self.pending_record_count() > 0
-            ):
-                self.run_async(
-                    lambda: sync_records(self.store, self.profile, self.require_remote()),
-                    self._sync_finished,
-                    lambda exc: _LOG.info("Automatic sync skipped: %s", exc),
-                )
+            self._sync_if_needed()
         finally:
             if not self.closing:
                 self.root.after(60000, self._auto_sync)
 
+    def pending_message_count(self) -> int:
+        return self.store.pending_message_count(self.profile) if self.profile else 0
+
+    def has_pending_work(self) -> bool:
+        return bool(
+            self.pending_record_count()
+            or self.pending_file_count()
+            or self.pending_message_count()
+        )
+
+    def _sync_if_needed(self):
+        """Synchronize every durable queue, not just pending records."""
+        if not self.profile:
+            return
+        if self.connection.state is not ConnectionState.ONLINE:
+            return
+        if not self.preferences.get("auto_sync", True):
+            return
+        if not self.has_pending_work():
+            return
+        self.run_async(
+            self._sync_work,
+            self._sync_finished,
+            lambda exc: _LOG.info("Automatic sync skipped: %s", exc),
+        )
+
+    def _sync_work(self):
+        remote = self.require_remote()
+        result = {"saved": 0, "conflicts": [], "uploaded": 0, "failed_files": [], "messages_sent": 0}
+        if self.pending_record_count():
+            result.update(sync_records(self.store, self.profile, remote))
+        if self.pending_file_count():
+            result.update(sync_files(self.store, self.profile, remote))
+        if self.pending_message_count():
+            result["messages_sent"] = self.store.flush_messages(self.profile, remote)
+        return result
+
     def _sync_finished(self, result):
         saved = result.get("saved", 0)
         conflicts = result.get("conflicts", [])
+        uploaded = result.get("uploaded", 0)
+        messages = result.get("messages_sent", 0)
+        failed = result.get("failed_files", [])
+        parts = []
         if saved:
-            self._set_status(f"Synchronized {saved} record(s)" + (f" · conflicts: {len(conflicts)}" if conflicts else ""))
+            parts.append(f"{saved} record(s)")
+        if uploaded:
+            parts.append(f"{uploaded} file(s)")
+        if messages:
+            parts.append(f"{messages} message(s)")
+        if parts:
+            text = f"Synchronized {' · '.join(parts)}"
+            if conflicts:
+                text += f" · conflicts: {len(conflicts)}"
+            if failed:
+                text += f" · retrying {len(failed)} file(s)"
+            self._set_status(text)
             self.refresh_current()
 
     def require_remote(self):

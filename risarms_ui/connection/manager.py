@@ -2,6 +2,13 @@
 
 All blocking work is done by the caller's worker thread; this class never
 touches Tk. State changes are delivered through registered callbacks.
+
+The monitor thread owns recovery. A lost heartbeat, a dead control channel or a
+transport failure schedules a single guarded reconnection attempt using the
+stored device credential, with bounded exponential backoff. The manager reports
+``ONLINE`` only when the heartbeat succeeds *and* the control channel it
+previously held has been restored; an explicit rejection or revocation halts
+automatic recovery and requires the user to authenticate again.
 """
 from __future__ import annotations
 
@@ -15,6 +22,9 @@ from .events import EventStream
 from .states import ConnectionState
 
 _LOG = logging.getLogger(__name__)
+
+# Terminal states never retry on their own: the server has made a decision.
+_HALT_STATES = (ConnectionState.AUTH_REJECTED, ConnectionState.PENDING_APPROVAL)
 
 
 class ConnectionManager:
@@ -48,7 +58,13 @@ class ConnectionManager:
         self._stop = threading.Event()
         self._monitor = None
         self._events = None
+        self._events_expected = False
         self._backoff = 0.5
+        self._retry_at = 0.0
+        self._needs_reconnect = False
+        self._halted = False
+        self._renew_requested = False
+        self._reconnect_lock = threading.Lock()
         self.enable_events = bool(enable_events)
 
     @property
@@ -144,75 +160,222 @@ class ConnectionManager:
             self._account = account or str(profile.get("id", ""))
             self._stop.clear()
             self._backoff = 0.5
+            self._retry_at = 0.0
+            self._needs_reconnect = False
+            self._halted = False
             self._activated = time.monotonic()
         if old is not None and old is not api:
             old.close()
-        self.set_state(ConnectionState.ONLINE)
         if self.enable_events:
             self._start_events()
+            if self._events_expected and not self._event_channel_healthy():
+                # The control channel is required once the server has issued a
+                # ticket; do not claim Online while it is dead. A server without
+                # the channel at all (_events_expected False) stays on polling.
+                self._mark_disconnected("event channel unavailable")
+            else:
+                self.set_state(ConnectionState.ONLINE)
+        else:
+            self.set_state(ConnectionState.ONLINE)
         if self._monitor is None or not self._monitor.is_alive():
             self._monitor = threading.Thread(target=self._monitor_loop, name="risarms-connection", daemon=True)
             self._monitor.start()
 
-    def _start_events(self):
+    # ----------------------------------------------------------------- events
+    def _start_events(self) -> bool:
         api = self.api
         if api is None:
-            return
+            return False
         try:
             ticket = api.ws_ticket()
         except APIError:
-            return
+            return False
         token = ticket.get("ticket")
         if not token:
-            return
-        old = self._events
-        if old is not None:
-            old.stop()
-        self._events = EventStream(
-            self._server,
-            token,
-            on_event=self._on_event,
-            on_close=self._on_event_close,
-        )
-        self._events.start()
+            return False
+        self._stop_event_stream()
+        stream = EventStream(self._server, token, on_event=self._on_event)
+
+        def closed(reason: str, _stream=stream):
+            self._on_event_close(reason, _stream)
+
+        stream.on_close = closed
+        with self._lock:
+            self._events = stream
+            self._events_expected = True
+        stream.start()
+        return True
+
+    def _stop_event_stream(self):
+        with self._lock:
+            stream = self._events
+            self._events = None
+        if stream is not None:
+            stream.stop()
+
+    def _event_channel_healthy(self) -> bool:
+        stream = self._events
+        return bool(stream is not None and stream.alive)
 
     def _on_event(self, event: dict):
         kind = event.get("type", "")
         if kind == "session.revoked":
+            self._halted = True
+            self._needs_reconnect = False
+            self._stop_event_stream()
+            self._close_api()
             self.set_state(ConnectionState.AUTH_REJECTED, "session revoked by server")
-            self._stop.set()
         elif kind == "session.expiring":
-            self.set_state(ConnectionState.RECONNECTING, "session expiring")
+            # Ask the monitor to renew on its next tick instead of dropping the
+            # session; the heartbeat still proves the server is reachable.
+            self._renew_requested = True
         self._publish(event)
 
-    def _on_event_close(self, reason: str):
-        if not self._stop.is_set() and self.state is ConnectionState.ONLINE:
-            self.set_state(ConnectionState.RECONNECTING, "event channel closed")
+    def _on_event_close(self, reason: str, stream=None):
+        if stream is not None and stream is not self._events:
+            return  # a channel we deliberately replaced
+        if self._stop.is_set() or self._halted:
+            return
+        if self.state in (ConnectionState.ONLINE, ConnectionState.RECONNECTING):
+            self._mark_disconnected("event channel closed")
+
+    # -------------------------------------------------------------- recovery
+    def _close_api(self):
+        with self._lock:
+            api = self._api
+            self._api = None
+        if api is not None:
+            try:
+                api.close()
+            except Exception:
+                _LOG.exception("Closing the API client failed")
+
+    def _schedule_retry(self):
+        with self._lock:
+            delay = min(self._backoff, self.max_backoff)
+            self._backoff = min(self.max_backoff, max(self._backoff * 2, 0.5))
+            self._retry_at = time.monotonic() + delay + random.uniform(0, delay / 4)
+            self._needs_reconnect = True
+
+    def _mark_disconnected(self, detail: str, unavailable: bool = False):
+        with self._lock:
+            if self._halted:
+                return
+            already_scheduled = self._needs_reconnect
+            self._needs_reconnect = True
+        if not already_scheduled:
+            self._schedule_retry()
+        self._stop_event_stream()
+        self.set_state(
+            ConnectionState.SERVER_UNAVAILABLE if unavailable else ConnectionState.RECONNECTING,
+            detail,
+        )
+
+    def _halt(self, state: ConnectionState, detail: str):
+        with self._lock:
+            self._halted = True
+            self._needs_reconnect = False
+        self._stop_event_stream()
+        self._close_api()
+        self.set_state(state, detail)
+        self._stop.set()
+
+    def _handle_failure(self, exc: APIError):
+        if exc.status in (401, 403):
+            state = ConnectionState.AUTH_EXPIRED if exc.status == 401 else ConnectionState.AUTH_REJECTED
+            self._halt(state, str(exc))
+        elif exc.status == 0:
+            self._mark_disconnected(str(exc), unavailable=True)
+        else:
+            self._mark_disconnected(str(exc))
+
+    def _ensure_online(self, detail: str = ""):
+        """Report Online only when the control channel is actually usable."""
+        if self.enable_events and self._events_expected and not self._event_channel_healthy():
+            started = self._start_events()
+            if not started or not self._event_channel_healthy():
+                self._mark_disconnected("event channel unavailable")
+                return
+        self.set_state(ConnectionState.ONLINE, detail)
+
+    def _attempt_reconnect(self) -> bool:
+        with self._lock:
+            if self._halted:
+                return False
+        if not self._reconnect_lock.acquire(blocking=False):
+            return False  # an attempt is already in flight
+        try:
+            server, account = self._server, self._account
+            credential = self._device_credential
+            if not credential and self.credentials is not None and account:
+                credential = self.credentials.get(server, account) or ""
+            if not server or not credential:
+                self._halt(ConnectionState.OFFLINE, "no stored device credential")
+                return False
+            self.set_state(ConnectionState.RECONNECTING, "reconnecting with device credential")
+            try:
+                self.connect_device(server, account, credential)
+            except APIError as exc:
+                self._handle_failure(exc)
+                return False
+            except Exception:
+                _LOG.exception("Reconnection failed")
+                self._mark_disconnected("reconnection failed")
+                return False
+            with self._lock:
+                self._backoff = 0.5
+                self._retry_at = 0.0
+                self._needs_reconnect = False
+            self._ensure_online("reconnected")
+            self._publish({"type": "connection.restored", "server": server})
+            return True
+        finally:
+            if not self._halted:
+                self._stop.clear()
+            self._reconnect_lock.release()
 
     def _monitor_loop(self):
-        while not self._stop.wait(self.heartbeat_interval):
+        tick = min(self.heartbeat_interval, 1.0)
+        while not self._stop.wait(tick):
+            with self._lock:
+                if self._halted:
+                    return
+                needs_reconnect = self._needs_reconnect
+                retry_at = self._retry_at
+            if needs_reconnect:
+                if time.monotonic() >= retry_at:
+                    self._attempt_reconnect()
+                continue
             api = self.api
             if api is None:
+                self._mark_disconnected("connection lost")
                 continue
             try:
-                if time.monotonic() - self._activated >= self.renew_after:
-                    api.renew()
-                    with self._lock:
-                        self._activated = time.monotonic()
-                api.health()
-                if self.state is ConnectionState.RECONNECTING:
-                    self.set_state(ConnectionState.ONLINE, "heartbeat restored")
+                self._heartbeat(api)
             except APIError as exc:
                 if self._stop.is_set():
                     return
-                if exc.status == 401:
-                    self.set_state(ConnectionState.AUTH_EXPIRED)
-                    if not self._try_renew():
-                        self.set_state(ConnectionState.AUTH_EXPIRED)
-                elif exc.status == 0:
-                    self.set_state(ConnectionState.SERVER_UNAVAILABLE)
-                else:
-                    self.set_state(ConnectionState.RECONNECTING)
+                self._handle_failure(exc)
+                continue
+            except Exception:
+                _LOG.exception("Heartbeat failed unexpectedly")
+                self._mark_disconnected("heartbeat error")
+                continue
+            self._ensure_online("heartbeat ok")
+
+    def _heartbeat(self, api):
+        renew = self._renew_requested
+        if not renew and self.renew_after and time.monotonic() - self._activated >= self.renew_after:
+            renew = True
+        if renew:
+            self._renew_requested = False
+            result = api.renew() or {}
+            with self._lock:
+                self._activated = time.monotonic()
+            profile = result.get("profile")
+            if profile:
+                self._publish({"type": "session.refreshed", "profile": profile})
+        api.health()
 
     def _try_renew(self) -> bool:
         api = self.api
@@ -225,38 +388,22 @@ class ConnectionManager:
         except APIError as exc:
             if exc.status in (401, 403):
                 return False
-            self.set_state(ConnectionState.RECONNECTING)
+            self._mark_disconnected("session renewal failed")
             return False
 
-    def reconnect(self):
-        """Attempt reconnection using the remembered device credential."""
-        api = self.api
-        server, account = self._server, self._account
-        if api is not None:
-            server = api.url
-        if not server:
-            self.set_state(ConnectionState.OFFLINE)
-            return False
-        credential = self._device_credential
-        if not credential and self.credentials is not None and account:
-            credential = self.credentials.get(server, account) or ""
-        if not credential:
-            self.set_state(ConnectionState.OFFLINE, "no stored device credential")
-            return False
-        delay = min(self._backoff, self.max_backoff)
-        self._backoff = min(self.max_backoff, self._backoff * 2)
-        self.set_state(ConnectionState.RECONNECTING)
-        self._sleep(delay + random.uniform(0, delay / 4))
-        try:
-            self.connect_device(server, account, credential)
-            self._backoff = 0.5
-            return True
-        except APIError as exc:
-            if exc.status in (401, 403):
-                self.set_state(ConnectionState.AUTH_REJECTED)
-            else:
-                self.set_state(ConnectionState.SERVER_UNAVAILABLE)
-            return False
+    def reconnect(self) -> bool:
+        """Attempt one immediate reconnection using the remembered device credential.
+
+        Backoff scheduling is owned by the monitor thread; this entry point is
+        for an operator- or UI-triggered retry and never runs concurrently with
+        a scheduled attempt.
+        """
+        with self._lock:
+            if self._halted and self._state in _HALT_STATES:
+                return False
+            self._needs_reconnect = True
+            self._retry_at = time.monotonic()
+        return self._attempt_reconnect()
 
     def disconnect(self, logout: bool = True):
         with self._lock:
@@ -264,6 +411,9 @@ class ConnectionManager:
             self._api = None
             events = self._events
             self._events = None
+            self._events_expected = False
+            self._needs_reconnect = False
+            self._halted = True
             self._stop.set()
         if events is not None:
             events.stop()

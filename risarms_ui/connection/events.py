@@ -33,6 +33,11 @@ class EventStream:
         self._stop = threading.Event()
         self._socket = None
 
+    @property
+    def alive(self) -> bool:
+        """True while the reader thread is still holding a usable channel."""
+        return bool(self._thread and self._thread.is_alive() and not self._stop.is_set())
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return

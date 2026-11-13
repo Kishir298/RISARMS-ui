@@ -6,7 +6,22 @@ import subprocess
 import threading
 from pathlib import Path
 
-from client.inference import ChatStream
+
+def chat_stream():
+    """Load CORE-CLIENT's streaming client lazily.
+
+    The desktop package must import without CORE-CLIENT installed (the
+    ``client`` name also belongs to this repository's legacy portal package),
+    so the dependency is resolved only when local inference actually runs.
+    """
+    try:
+        from client.inference import ChatStream
+    except ImportError as exc:  # pragma: no cover - depends on install shape
+        raise RuntimeError(
+            "Local AI needs the CORE-CLIENT library (the 'core-client' package). "
+            "Install it, or use CORE-HOST mode."
+        ) from exc
+    return ChatStream
 
 
 class LocalRunner:
@@ -18,7 +33,7 @@ class LocalRunner:
 
     def model(self, model, prompt, emit, history=None):
         if not model.strip(): raise ValueError("Choose an installed local Ollama model.")
-        stream = ChatStream(model, (history or []) + [{"role":"user","content":prompt}])
+        stream = chat_stream()(model, (history or []) + [{"role": "user", "content": prompt}])
         with self.lock: self.response = stream
         try:
             if self.cancel.is_set(): return "cancelled"
