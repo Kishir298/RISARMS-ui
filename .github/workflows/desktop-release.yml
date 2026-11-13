@@ -2,11 +2,19 @@ name: desktop-release
 
 on:
   workflow_dispatch:
+    inputs:
+      core_ref:
+        description: CORE commit SHA that provides CORE-CLIENT
+        required: false
+        default: c1eaaaaa841301eac90beb55fdb9f2e3f2092580
   push:
     tags: ["v*"]
 
 permissions:
   contents: read
+
+env:
+  CORE_REF: ${{ github.event.inputs.core_ref || 'c1eaaaaa841301eac90beb55fdb9f2e3f2092580' }}
 
 jobs:
   build:
@@ -28,37 +36,59 @@ jobs:
     steps:
       - name: Check out the desktop application
         uses: actions/checkout@v4
+
+      # Kishir298/CORE is the canonical combined repository (the old
+      # CORE-HOST name redirects to it). The ref is pinned so a release never
+      # depends on another repository's moving main branch.
       - name: Check out CORE-CLIENT dependency
         uses: actions/checkout@v4
         with:
-          repository: Kishir298/CORE-HOST
-          ref: ${{ github.event.inputs.core_ref || 'main' }}
+          repository: Kishir298/CORE
+          ref: ${{ env.CORE_REF }}
           path: CORE
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install Linux Tk libraries
+
+      - name: Install Linux Tk and packaging tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y python3-tk tk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk tk dpkg-dev fakeroot
+
+      - name: Install Windows packaging tools
+        if: runner.os == 'Windows'
+        run: choco install innosetup wixtoolset --no-progress -y
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ./CORE/CORE-CLIENT
           python -m pip install -e ".[test,package]"
+
       - name: Run tests and lint
         run: |
-          python -m ruff check risarms_ui tests
+          python -m ruff check --select E9,F,I risarms_ui tests
           python -m pytest -q
+
       - name: Check Tk availability
         run: python -m risarms_ui --doctor
-      - name: Build unsigned artifacts
+
+      - name: Build artifacts and native installers
         run: python packaging/build.py
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: risarms-portal-${{ matrix.artifact }}
+          name: risarms-desktop-${{ matrix.artifact }}
           path: |
             dist/RISARMS-Portal-*
+            dist/risarms-portal*
+            dist/*.dmg
+            dist/*.msi
+            dist/*.AppImage
+            dist/*.deb
             dist/SHA256SUMS
           if-no-files-found: error
