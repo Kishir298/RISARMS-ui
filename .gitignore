@@ -82,6 +82,18 @@ tls/
 *.key
 *.crt
 
+# PyInstaller and native installer output (built by CI, never committed)
+*.spec
+*.dmg
+*.msi
+*.AppImage
+*.deb
+*.rpm
+*.pkg
+SHA256SUMS
+sbom.cdx.json
+release/
+
 # Local databases (never commit)
 *.db
 *.sqlite
