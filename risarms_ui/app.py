@@ -116,6 +116,7 @@ class App:
         if self._lock is None:
             raise RuntimeError("RISARMS Portal is already running on this device.")
         self.closing = False
+        self._sync_running = False
         self.config_directory = config_directory()
         self.config_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.data_directory = data_directory()
@@ -692,11 +693,12 @@ class App:
             return
         if not self.has_pending_work():
             return
-        self.run_async(
-            self._sync_work,
-            self._sync_finished,
-            lambda exc: _LOG.info("Automatic sync skipped: %s", exc),
-        )
+        # The timer and the reconnect event can fire together; a second worker
+        # would re-upload the same pending files and messages.
+        if self._sync_running:
+            return
+        self._sync_running = True
+        self.run_async(self._sync_work, self._sync_finished, self._sync_failed)
 
     def _sync_work(self):
         remote = self.require_remote()
@@ -709,7 +711,12 @@ class App:
             result["messages_sent"] = self.store.flush_messages(self.profile, remote)
         return result
 
+    def _sync_failed(self, exc):
+        self._sync_running = False
+        _LOG.info("Automatic sync skipped: %s", exc)
+
     def _sync_finished(self, result):
+        self._sync_running = False
         saved = result.get("saved", 0)
         conflicts = result.get("conflicts", [])
         uploaded = result.get("uploaded", 0)

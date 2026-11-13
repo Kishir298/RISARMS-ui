@@ -60,9 +60,12 @@ def _doctor() -> int:
         failures.append("websockets")
 
     try:
-        import client
+        # This repository also ships a legacy ``client`` package, so importing
+        # ``client`` here would always succeed even when CORE-CLIENT is absent.
+        # The installed distribution is the only reliable signal.
+        from importlib import metadata
 
-        checks["core-client"] = getattr(client, "__version__", "installed")
+        checks["core-client"] = metadata.version("core-client")
     except Exception as exc:
         checks["core-client"] = f"missing: {exc}"
         failures.append("core-client")

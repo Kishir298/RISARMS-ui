@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 from risarms_ui.remote import RemoteError
 from risarms_ui.store import LocalStore
@@ -124,6 +125,40 @@ def test_threads_report_unread_and_last_body(tmp_path):
         assert threads[0]["unread"] >= 1
         store.mark_thread_read(profile, "alice")
         assert store.threads(profile)[0]["unread"] == 0
+    finally:
+        store.close()
+
+
+def test_queued_work_survives_a_store_restart(tmp_path):
+    """Closing the application must not discard unsent messages or uploads."""
+    store, profile = make_store(tmp_path)
+    message_id = store.queue_message(profile, "alice", "survive the restart")
+    file_id = store.add_file(profile, "report.txt", b"pending upload")
+    store.close()
+
+    reopened = LocalStore(tmp_path / "data")
+    try:
+        assert reopened.pending_message_count(profile) == 1
+        queued = reopened.messages(profile, "alice")
+        assert [row["id"] for row in queued] == [message_id]
+        assert queued[0]["status"] == "queued"
+        pending_files = [row for row in reopened.files(profile) if row["pending"]]
+        assert [row["id"] for row in pending_files] == [file_id]
+        assert Path(pending_files[0]["path"]).read_bytes() == b"pending upload"
+    finally:
+        reopened.close()
+
+
+def test_repeated_flush_does_not_resend(tmp_path):
+    """A second synchronization cycle must not duplicate an already-sent message."""
+    store, profile = make_store(tmp_path)
+    try:
+        store.queue_message(profile, "alice", "only once")
+        remote = FakeRemote()
+        assert store.flush_messages(profile, remote) == 1
+        assert store.flush_messages(profile, remote) == 0
+        assert len(remote.calls) == 1
+        assert len(store.messages(profile, "alice")) == 1
     finally:
         store.close()
 
