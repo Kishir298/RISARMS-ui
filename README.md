@@ -1,225 +1,163 @@
-# C.O.R.E.-CLIENT — External-Device Client (LEGACY)
+# RISARMS Portal — Unified Desktop Application
 
-> **Legacy checkout:** the canonical C.O.R.E. client now lives in
-> `CORE/CORE-CLIENT` (desktop app, local inference, model support, and the
-> newest portal hardening). This standalone repository is retained for
-> historical protocol compatibility only. New work belongs in the bundle.
+**Version:** `0.6.0`
+**Status:** Source and automated tests implemented. Physical Windows/Linux runs,
+signed installers and long-duration validation are **not yet performed**.
+**Platforms:** macOS, Windows, Linux (Python `>=3.10`, Tkinter/ttk)
 
-**Version:** `0.4.0` (protocol-compatible with C.O.R.E.-HOST v0.4.0; wire negotiates 0.3.0–0.4.0)
-**Status:** **Implementation Complete · Physical LAN Validation Pending**
-**Platform:** macOS / Linux / any Python `>=3.10` device
-**R.I.S.A.R.M.S. subsystem:** C.O.R.E. client
-
-C.O.R.E.-CLIENT is the **independent external-device client** for
-**C.O.R.E.-HOST**, the Windows-hosted C.O.R.E. server/runtime
-(`Kishir298/CORE`, to be renamed `Kishir298/CORE-HOST`).
-Naming: `CORE-CLIENT` is the directory, `client` is the Python import package; run it as `python3 -m client`.
-
-Relationship:
+RISARMS Portal is the canonical desktop client for the R.I.S.A.R.M.S. ecosystem.
+It connects to CORE-HOST and presents C.O.R.E., ASIS, ASCS, RESCS and TIVISS in
+one application while keeping local profiles, history, records and files usable
+offline.
 
 ```text
-CORE-HOST (Windows, 192.168.1.67:5000)
-    │ TCP + TLS
-    ▼
-CORE-CLIENT (Mac / external R.I.S.A.R.M.S. device)
+RISARMS Portal (this application)
+        │ HTTPS + WSS
+        ▼
+CORE-HOST (127.0.0.1:8780 / 8781 behind Caddy)
+        ├── ASIS     chat / owner services
+        ├── ASCS     coding workspace
+        ├── TIVISS   independent agent
+        └── RESCS    records + files
 ```
 
-It connects to C.O.R.E.-HOST over TCP+TLS, authenticates with an explicit
-login token, registers as a device, and supports discovery, reconnection,
-and clean shutdown. **Standard library only — no third-party packages, no
-host imports.**
+The desktop app is a presentation client. It does not bypass CORE-HOST roles,
+CSRF, audit, storage scope or owner re-authentication.
 
-> Physical Windows ↔ Mac LAN validation has NOT yet been performed.
-> See `docs/lan-testing.md`. Do not claim otherwise.
+## Features
 
----
+- Local profiles protected by a passphrase-derived verifier (scrypt); no
+  recovery service. This is an application lock, not disk encryption.
+- HTTPS login with password, registration request or first-owner setup.
+- Remembered, scoped and revocable **device credentials** stored in the OS
+  keychain (memory-only if keyring is unavailable).
+- Automatic reconnect with backoff, 12-hour server sessions, renewal and a WSS
+  control channel; polling continues when WSS is unavailable.
+- Offline SQLite store for records, history, cached files and an explicit sync
+  queue with conflict reporting.
+- RESCS record and cloud-file workspaces with SHA-256 integrity checks and an
+  8 MiB per-file limit.
+- ASIS chat (server, local Ollama or local service), ASCS coding workspace and
+  TIVISS workspace.
+- Task jobs with output polling, cancellation and idempotent server creation.
+- Owner-only administration for accounts, access requests, audit, quotas,
+  settings and server status.
+- Light/dark themes, responsive scrolling, keyboard basics and single-instance
+  protection.
+- PyInstaller one-directory builds for macOS, Windows and Linux, with optional
+  signing/notarization hooks.
 
-## Installation
+## Install for development
 
-Runtime stdlib-only (Python `>=3.10`; tests require `pytest>=8.0`):
+Tkinter must be present for the GUI:
 
 ```bash
-cd /path/to/CORE-CLIENT
-python3 -m client --help
+# macOS with Homebrew Python
+brew install python-tk@3.14
+
+# Debian/Ubuntu
+sudo apt install python3-tk
 ```
 
-Run the automated tests:
+Then:
 
 ```bash
-python3 -m pytest -q
+git clone https://github.com/Kishir298/RISARMS-ui.git
+cd RISARMS-ui
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ../CORE/CORE-CLIENT
+.venv/bin/python -m pip install -e ".[test]"
+.venv/bin/python -m risarms_ui --doctor
+.venv/bin/python -m risarms_ui
 ```
 
-## Quick start
+`--doctor` checks Tk, the display, keyring, websockets, core-client and writable
+application directories without opening a window.
 
-One-time: save the remembered device (stores **no secrets**):
+## Tests and lint
 
 ```bash
-python3 -m client --remember \
-  --device-file ~/.risarms-device.json \
-  --device-id mac-01 \
-  --device-name "MacBook" \
-  --host 192.168.1.67 --port 5000
+.venv/bin/python -m pytest -q
+.venv/bin/ruff check risarms_ui tests packaging
 ```
 
-Every launch: log in (Option A — token required each time) and connect:
+Current result: **205 tests passed** (macOS Python 3.14). Tests do not require a
+display; GUI smoke tests require Tk.
+
+## Build desktop artifacts
 
 ```bash
-python3 -m client \
-  --device-file ~/.risarms-device.json \
-  --host 192.168.1.67 --port 5000 \
-  --ca-file ~/core-client-cert.pem
+python -m pip install -e ".[package]"
+python packaging/build.py
 ```
 
-The client prompts `Token for mac-01:` (or pass `--token` for scripting),
-then performs `CORE_HANDSHAKE` → authentication → `DEVICE_REGISTER` and
-reports `online`. Interactive commands: `discover | reconnect | session | quit` (`exit` aliases `quit`).
-`Ctrl+C` disconnects cleanly.
+Artifacts are written to `dist/`:
 
-On every launch the client also starts its localhost portal and prints:
+- macOS: `RISARMS-Portal-0.6.0-macos-<arch>.zip` (contains `RISARMS Portal.app`)
+- Windows: `RISARMS-Portal-0.6.0-windows-<arch>.zip`
+- Linux: `RISARMS-Portal-0.6.0-linux-<arch>.tar.gz`
+- `SHA256SUMS`
+
+Builds are unsigned by default. Optional hooks:
+
+| Variable | Purpose |
+|---|---|
+| `RISARMS_SIGN_IDENTITY` | macOS Developer ID identity |
+| `RISARMS_NOTARY_PROFILE` | notarytool keychain profile |
+| `RISARMS_SIGN_CERT` / `RISARMS_SIGN_PASSWORD` | Windows certificate |
+| `RISARMS_TIMESTAMP_URL` | Windows RFC3161 timestamp server |
+
+Never commit certificates, private keys, notarization profiles or passwords.
+
+## Security notes
+
+- Passwords, cookies, CSRF tokens and WSS tickets stay in memory.
+- Only server-issued device credentials are persisted, through `keyring`.
+- Remote servers require HTTPS. HTTP is accepted only for loopback.
+- Redirects, environment proxies and origins containing credentials/paths are
+  refused.
+- Local concurrent edits are retained and reported as conflicts rather than
+  overwritten.
+- Logs never include passwords, session tokens, CSRF values or device
+  credentials.
+- Use full-disk encryption if local offline data needs encryption at rest.
+
+## Layout
 
 ```text
-Portal:
-http://127.0.0.1:8766
+risarms_ui/
+├── app.py            workspace shell, local login, navigation, UI queue
+├── entrypoint.py     CLI, --doctor, GUI startup
+├── jobs.py           server job polling and local execution
+├── layout.py         DPI-aware geometry and scrolling
+├── local.py          local Ollama/service runner (from CORE-CLIENT)
+├── paths.py          platform application directories
+├── remote.py         authenticated sync helpers
+├── store.py          offline SQLite profiles/records/files/history
+├── theme.py          light/dark palettes
+├── widgets.py        cards, status pill, scroll frame
+├── connection/       HTTPS API, WSS client, state machine
+├── pages/            home, chats, tasks, storage, files, devices, admin, settings
+└── security/         OS keychain wrapper
 ```
 
-See `docs/client-portal.md` (dashboard, capabilities, AI local/offload,
-R.E.S.C.S., network, session). Flags: `--no-portal`, `--portal-port`,
-`--location-precision exact|approximate|city|hidden`.
+## Documentation
 
-## Authentication (Option A)
+- [System specification](https://github.com/Kishir298/RISARMS-DOCS/blob/main/systems/risarms-ui.md)
+- [Build and release](https://github.com/Kishir298/RISARMS-DOCS/blob/main/development/desktop-app.md)
+- [ADR 0010 — canonical desktop client](https://github.com/Kishir298/RISARMS-DOCS/blob/main/decisions/0010-risarms-ui-canonical-desktop-client.md)
 
- Persistent remembered state (`~/.risarms-device.json`) holds only:
+## Validation status
 
- ```text
- device_id, identity_id, join_name, device_name, device_type, platform,
- capabilities, protocol_version, host, port
- ```
+| Item | Status |
+|---|---|
+| UI/HTTP/connection tests | IMPLEMENTED (205 passed) |
+| CORE-HOST desktop control contracts | IMPLEMENTED (865 passed / 1 skipped) |
+| Tk GUI launch in this workspace | PENDING (Tk installation incomplete) |
+| Physical Windows run | NOT YET PERFORMED |
+| Physical Linux run | NOT YET PERFORMED |
+| Signed/notarized installers | NOT YET PERFORMED (hooks implemented) |
+| LAN reconnect/revocation and 24/7 use | NOT YET PERFORMED |
 
- The `join_name` (e.g. `MacBook-mac-01`) is generated once at first
- configuration, stays stable across reconnects and restarts, and contains
- no secrets.
-
-It MUST NOT and does NOT contain: `token, credential, password,
-api_token, session, session_token, connection_id, authenticated`.
-
-Lifecycle:
-
-```text
-start → load remembered device → REQUIRE login → token in memory only
-→ TLS → CORE_HANDSHAKE → auth → DEVICE_REGISTER → online
-→ shutdown: socket closed, token/session/connection cleared
-→ device stays remembered → next launch requires login again
-```
-
-The host must provision the device first (`provision-device` on
-C.O.R.E.-HOST); the token is handed to the device user out-of-band.
-
-## TLS
-
-* Enabled **by default**. No silent plaintext downgrade.
-* TLS 1.2 minimum; certificates validated by default (`CERT_REQUIRED`).
-* `--ca-file <path>` supplies the host's public certificate for
-  self-signed/private-CA setups. Copy ONLY the public `core.crt`/`core.pem`
-  to the device — the server private key (`core.key`, `.pfx`) NEVER belongs
-  on the client and is never needed.
-* `--insecure` skips verification (trusted LAN only, explicit opt-in).
-* `--no-tls` plaintext exists for localhost testing only — never for LAN.
-* Note: hostname check is disabled for `CN=localhost/SAN 192.168.1.67` self-signed setups; certificate chain is still required (see `docs/lan-testing.md`).
-
-## Protocol
-
-Framing: 4-byte big-endian length prefix + UTF-8 JSON, 10 MiB max frame.
-
-```text
-CORE_HANDSHAKE / CORE_HANDSHAKE_RESPONSE
-DEVICE_REGISTER / DEVICE_REGISTER_RESPONSE
-DEVICE_DISCOVER / DEVICE_DISCOVER_RESPONSE
-DEVICE_INFO / DEVICE_INFO_RESPONSE
-DATA_REQUEST / DATA_RESPONSE / DATA_ERROR
-SERVICE_REQUEST / SERVICE_RESPONSE (destination service:<id>)
-DEVICE_ERROR
-```
-
- Identity model: `device_id` (stable) + `identity_id` (security, bound to
- `device_id`) + `join_name` (stable human-readable label) stay constant;
- the host issues a fresh `connection_id` per connection. Duplicate active
- registration is rejected with `DEVICE_ALREADY_REGISTERED`.
- See `docs/architecture.md`.
-
- ## Connection lease
-
- Every connection carries a host-authoritative 24-hour lease
- (`connected_at`, `lease_expires_at`, `lease_duration_seconds`). The
-  client tracks it locally; the host forcibly closes expired connections.
-  After a forced close the client marks itself disconnected (identity and
-  `join_name` preserved) and must log in + reconnect for a fresh lease.
-
-## Application messaging
-
-After `DEVICE_REGISTER`, one authenticated connection carries all
-application traffic (no second socket per request). Every call attaches
-the ephemeral session token automatically and waits for one bounded
-response (`timeout`, default 10 s):
-
-```python
-from client.core_device_client import CoreDeviceClient
-
-client = CoreDeviceClient(host="192.168.1.67", port=5000,
-                          device_id="mac-01", device_name="MacBook")
-client.login(token)          # RAM only, never persisted
-client.connect()
-client.register()
-
-client.discover()                                   # DEVICE_DISCOVER
-client.device_info("mac-01")                        # DEVICE_INFO
-client.data_request("record_list", {"namespace": "notes", "limit": 5})
-client.service_request("health", "status")          # -> service:health
-client.service_request("agent", "status", {"device_id": "mac-01"})
-client.send_to_device("other-01", "APP_MESSAGE", {"text": "hi"})
-client.request("core", "DEVICE_DISCOVER", {})       # generic escape hatch
-```
-
-Rules: register before any application call; each request carries a
-unique `request_id`; `DEVICE_ERROR`/`DATA_ERROR` responses raise
-`DeviceClientError` with the host code preserved (`DEVICE_NOT_FOUND`,
-`INVALID_DATA_REQUEST`, ...); connection loss marks the client
-`DISCONNECTED` (session destroyed, identity kept). No protocol change
-was needed on the host — these reuse the existing `DEVICE_DISCOVER` /
-`DEVICE_INFO` / `DATA_REQUEST` / `service:*` handlers.
-
-## Project structure
-
-```text
-CORE-CLIENT/
-├── client/                  # stdlib-only device client (Option A login)
-│   ├── portal/              # localhost dashboard (127.0.0.1)
-│   ├── capabilities.py      # capability detection
-│   ├── geo.py               # location model
-│   └── models.py            # model profiles
-├── tests/                   # stdlib-only suite (fake in-process host)
-│   └── fake_host.py         # in-process fake host
-├── docs/
-│   ├── architecture.md
-│   ├── setup.md
-│   ├── client-portal.md
-│   └── lan-testing.md
-├── runtime/certificates/    # runtime trust input (public certs only, git-ignored)
-├── pyproject.toml
-└── .gitignore
-```
-
-Tracked placeholder `runtime/certificates/.gitkeep` is committed; `.git/`, `.pytest_cache/` and other caches are git-ignored.
-
-## Security rules
-
-1. Never commit credentials, tokens, or private TLS keys.
-2. Never copy `core.key` / `.pfx` to a device.
-3. Never disable TLS to make LAN testing easier.
-4. Never store the login token on disk.
-5. Never claim physical LAN validation without performing it.
-
-## Docs
-
-* `docs/architecture.md` — client design, protocol, identity model
-* `docs/setup.md` — installation, host provisioning, TLS setup
-* `docs/lan-testing.md` — physical LAN validation procedure (NOT YET PERFORMED)
+The `tests/` directory also retains protocol-compatibility tests migrated from
+CORE-CLIENT; the native TCP/TLS client itself remains in `CORE/CORE-CLIENT`.

@@ -1,0 +1,64 @@
+name: desktop-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-13
+            artifact: macos-x86_64
+          - name: Windows
+            os: windows-latest
+            artifact: windows-x86_64
+          - name: Linux
+            os: ubuntu-22.04
+            artifact: linux-x86_64
+    steps:
+      - name: Check out the desktop application
+        uses: actions/checkout@v4
+      - name: Check out CORE-CLIENT dependency
+        uses: actions/checkout@v4
+        with:
+          repository: Kishir298/CORE-HOST
+          ref: ${{ github.event.inputs.core_ref || 'main' }}
+          path: CORE
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Linux Tk libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk tk
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ./CORE/CORE-CLIENT
+          python -m pip install -e ".[test,package]"
+      - name: Run tests and lint
+        run: |
+          python -m ruff check risarms_ui tests
+          python -m pytest -q
+      - name: Check Tk availability
+        run: python -m risarms_ui --doctor
+      - name: Build unsigned artifacts
+        run: python packaging/build.py
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: risarms-portal-${{ matrix.artifact }}
+          path: |
+            dist/RISARMS-Portal-*
+            dist/SHA256SUMS
+          if-no-files-found: error
