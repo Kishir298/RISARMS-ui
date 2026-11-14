@@ -65,14 +65,13 @@ Then:
 git clone https://github.com/Kishir298/RISARMS-ui.git
 cd RISARMS-ui
 python3 -m venv .venv
-.venv/bin/python -m pip install -e ../CORE/CORE-CLIENT
 .venv/bin/python -m pip install -e ".[test]"
 .venv/bin/python -m risarms_ui --doctor
 .venv/bin/python -m risarms_ui
 ```
 
-`--doctor` checks Tk, the display, keyring, websockets, core-client and writable
-application directories without opening a window.
+`--doctor` checks Tk, the display, keyring, websockets and writable application
+directories without opening a window. CORE-CLIENT is not required.
 
 ## Tests and lint
 

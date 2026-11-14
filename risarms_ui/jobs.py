@@ -19,6 +19,8 @@ class JobSession:
         self.job_id = ""
         self.cancelled = threading.Event()
         self.thread = None
+        if hasattr(app, "active_jobs"):
+            app.active_jobs.add(self)
 
     @property
     def running(self) -> bool:
@@ -76,6 +78,9 @@ class JobSession:
             except Exception as exc:
                 if not self.cancelled.is_set():
                     self.on_error(exc)
+            finally:
+                if hasattr(self.app, "active_jobs"):
+                    self.app.active_jobs.discard(self)
 
         self.thread = threading.Thread(target=run, daemon=True, name="risarms-job")
         self.thread.start()

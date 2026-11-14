@@ -47,6 +47,7 @@ class TasksPage(Page):
         self.output.pack(fill="both", expand=True)
         self.session = None
         self.output_text = ""
+        self.source_used = "Local model"
 
     def _append(self, text):
         self.output_text = (self.output_text + text)[-500000:]
@@ -82,10 +83,11 @@ class TasksPage(Page):
         mode = self.mode.get()
         if source == "Auto":
             source = "Server" if self.app.connection.state.name == "ONLINE" else "Local model"
+        self.source_used = source
         if service == "ascs" and source in ("Server", "Local service"):
             if not messagebox.askyesno("Allow coding task", "ASCS can generate and modify files. Continue?"):
                 return
-        if service in ("ascs", "tiviss") and self.app.connection.profile and self.app.connection.profile.get("role") != "owner":
+        if service in ("ascs", "tiviss") and not self.app.is_owner():
             messagebox.showerror("Permission", "ASCS and TIVISS require the CORE owner account.")
             return
         self.output_text = ""
@@ -119,11 +121,12 @@ class TasksPage(Page):
 
     def complete(self, result):
         self.status.set(f"Finished: {result}")
-        self.app.store.log(self.app.profile, self.source.get() + ":" + self.service.get(),
-                           self.prompt.get("1.0", "end").strip(), self.output_text)
-        if self.source.get() == "Local model" and self.app.preferences.get("chat_storage", "both") in ("server", "both"):
+        source = self.source_used
+        prompt = self.prompt.get("1.0", "end").strip()
+        self.app.store.log(self.app.profile, source + ":" + self.service.get(), prompt, self.output_text)
+        if source in ("Local model", "Local service") and self.app.preferences.get("chat_storage", "both") in ("server", "both"):
             self.app.store.save(self.app.profile, self.service.get(), "chat-" + str(time.time_ns()),
-                                {"output": self.output_text})
+                                {"prompt": prompt, "output": self.output_text})
         self.app.refresh_current()
 
     def fail(self, exc):

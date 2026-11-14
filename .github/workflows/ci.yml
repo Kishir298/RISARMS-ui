@@ -22,25 +22,13 @@ jobs:
       - name: Check out the desktop application
         uses: actions/checkout@v4
 
-      # The desktop application links against the native CORE-CLIENT library.
-      # It is pinned to a commit so CI cannot drift with another repository.
-      - name: Check out CORE-CLIENT
-        uses: actions/checkout@v4
-        with:
-          repository: Kishir298/CORE
-          ref: c1eaaaaa841301eac90beb55fdb9f2e3f2092580
-          path: .core
-
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
-      # Dependencies come from pyproject.toml. This repository has no
-      # requirements.txt and must not be given one.
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e "./.core/CORE-CLIENT"
           python -m pip install -e ".[test]"
 
       - name: Run lint

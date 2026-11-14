@@ -47,7 +47,17 @@ class ServiceChatPage(Page):
         ttk.Label(self.body, textvariable=self.status, style="Muted.TLabel").pack(anchor="w", pady=6)
         self.session = None
         self.transcript = ""
+        self.source_used = "Local model"
         self.refresh()
+
+    def _append(self, text: str):
+        self.app.post_ui("append", (self, text))
+
+    def _done(self, result):
+        self.app.post_ui("job_done", (self, result))
+
+    def _error(self, exc):
+        self.app.post_ui("job_error", (self, exc))
 
     def append_output(self, text: str):
         self.transcript = (self.transcript + text)[-500000:]
@@ -73,9 +83,10 @@ class ServiceChatPage(Page):
         source = self.source.get()
         if source == "Auto":
             source = "Server" if self.app.connection.state.name == "ONLINE" else "Local model"
+        self.source_used = source
         self.append_output(f"\n\nYou: {prompt}\n\n{self.service.upper()}: ")
         self.status.set("Generating…")
-        self.session = JobSession(self.app, self.append_output, self.job_complete, self.job_failed)
+        self.session = JobSession(self.app, self._append, self._done, self._error)
         mode = self.mode.get() if self.coding else "plan"
         if source == "Server":
             self.session.start_server(self.service, prompt, mode,
@@ -99,11 +110,11 @@ class ServiceChatPage(Page):
     def job_complete(self, result):
         self.status.set(f"Finished: {result}")
         self.append_output(f"\n\n[{result}]")
-        self.app.store.log(self.app.profile, self.source.get() + ":" + self.service,
-                           self.prompt.get("1.0", "end").strip(), self.transcript)
+        prompt = self.prompt.get("1.0", "end").strip()
+        self.app.store.log(self.app.profile, self.source_used + ":" + self.service, prompt, self.transcript)
         if self.app.preferences.get("chat_storage", "both") in ("server", "both"):
-            self.app.store.save(self.app.profile, "asis", "chat-" + str(time.time_ns()),
-                                {"prompt": self.prompt.get("1.0", "end").strip(), "output": self.transcript})
+            self.app.store.save(self.app.profile, self.service, "chat-" + str(time.time_ns()),
+                                {"prompt": prompt, "output": self.transcript})
         self.prompt.delete("1.0", "end")
 
     def job_failed(self, exc):

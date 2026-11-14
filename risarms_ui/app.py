@@ -25,7 +25,7 @@ from .connection.manager import ConnectionManager
 from .connection.states import ConnectionState
 from .layout import initial_geometry
 from .pages.admin import AdministrationPage
-from .pages.connection import PasswordChangeDialog
+from .pages.connection import ConnectionPage, PasswordChangeDialog
 from .pages.devices import DevicesPage
 from .pages.files import FilesPage
 from .pages.history import HistoryPage
@@ -47,6 +47,7 @@ _LOG = logging.getLogger(__name__)
 
 NAVIGATION = (
     ("home", "Home", HomePage, False, ""),
+    ("connection", "Connection", ConnectionPage, False, "CORE-HOST sign-in and first-owner setup"),
     ("messages", "Messages", MessagesPage, False, "Direct messages between approved accounts"),
     ("asis", "ASIS", lambda parent, app: ServiceChatPage(parent, app, "asis", "ASIS Assistant"), False, "Chat and general assistance"),
     ("ascs", "ASCS", lambda parent, app: ServiceChatPage(parent, app, "ascs", "ASCS Coding", coding=True), False, "Coding agent — owner account"),
@@ -129,6 +130,7 @@ class App:
             enable_events=enable_events,
         )
         self.ui_queue: queue.Queue = queue.Queue()
+        self.active_jobs = set()
         self.profile = ""
         self.local_name = ""
         self.store = LocalStore(self.data_directory)
@@ -702,13 +704,17 @@ class App:
 
     def _sync_work(self):
         remote = self.require_remote()
-        result = {"saved": 0, "conflicts": [], "uploaded": 0, "failed_files": [], "messages_sent": 0}
-        if self.pending_record_count():
-            result.update(sync_records(self.store, self.profile, remote))
-        if self.pending_file_count():
-            result.update(sync_files(self.store, self.profile, remote))
-        if self.pending_message_count():
-            result["messages_sent"] = self.store.flush_messages(self.profile, remote)
+        result = {"saved": 0, "conflicts": [], "failed_records": [], "uploaded": 0,
+                  "failed_files": [], "messages_sent": 0, "queue_errors": []}
+        for name, work in (
+            ("records", lambda: sync_records(self.store, self.profile, remote)),
+            ("files", lambda: sync_files(self.store, self.profile, remote)),
+            ("messages", lambda: {"messages_sent": self.store.flush_messages(self.profile, remote)}),
+        ):
+            try:
+                result.update(work())
+            except Exception as exc:
+                result["queue_errors"].append(f"{name}: {exc}")
         return result
 
     def _sync_failed(self, exc):
@@ -722,6 +728,8 @@ class App:
         uploaded = result.get("uploaded", 0)
         messages = result.get("messages_sent", 0)
         failed = result.get("failed_files", [])
+        failed_records = result.get("failed_records", [])
+        queue_errors = result.get("queue_errors", [])
         parts = []
         if saved:
             parts.append(f"{saved} record(s)")
@@ -735,6 +743,10 @@ class App:
                 text += f" · conflicts: {len(conflicts)}"
             if failed:
                 text += f" · retrying {len(failed)} file(s)"
+            if failed_records:
+                text += f" · retrying {len(failed_records)} record(s)"
+            if queue_errors:
+                text += " · " + "; ".join(queue_errors)[:160]
             self._set_status(text)
             self.refresh_current()
 
@@ -828,6 +840,12 @@ class App:
         if self.closing:
             return
         self.closing = True
+        for job in list(getattr(self, "active_jobs", ())):
+            try:
+                job.stop()
+                job.wait(2)
+            except Exception:
+                _LOG.exception("Job shutdown failed")
         try:
             self.preferences["geometry"] = self.root.geometry()
             self.save_preferences()

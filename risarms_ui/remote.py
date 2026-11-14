@@ -81,16 +81,24 @@ def sync_records(store, profile, remote):
     health = remote.request("GET", "/api/health")
     if "conditional_records_v1" not in health.get("capabilities", []):
         raise RemoteError("This server does not support safe offline sync. Upgrade CORE-HOST before syncing.")
-    saved, conflicts = 0, []
-    for item in store.records(profile, pending=True):
-        try:
-            result = remote.request("POST", "/api/records", {"service": item["service"], "key": item["key"],
-                "value": item["value"], "expected_revision": item["base"]})
-            store.acknowledged(profile, item, result); saved += 1
-        except RemoteError as exc:
-            if exc.status != 409: raise
-            conflicts.append(item["service"] + "/" + item["key"])
-    return {"saved": saved, "conflicts": conflicts}
+    saved, conflicts, failed = 0, [], []
+    with store.record_sync_lock:
+        for item in store.pending_records(profile):
+            name = item["service"] + "/" + item["key"]
+            try:
+                result = remote.request("POST", "/api/records", {"service": item["service"], "key": item["key"],
+                    "value": item["value"], "expected_revision": item["base"]})
+                store.acknowledged(profile, item, result); saved += 1
+            except RemoteError as exc:
+                if exc.status == 409:
+                    conflicts.append(name)
+                    store.record_failed(profile, item["service"], item["key"], "conflict: " + str(exc))
+                else:
+                    failed.append(name)
+                    store.record_failed(profile, item["service"], item["key"], exc)
+                    if exc.status == 0:
+                        break
+    return {"saved": saved, "conflicts": conflicts, "failed_records": failed}
 
 
 def sync_files(store, profile, remote):
@@ -102,24 +110,27 @@ def sync_files(store, profile, remote):
     """
     _assert_bound(store, profile, remote)
     uploaded, failed = 0, []
-    for row in store.files(profile):
-        if not row["pending"]:
-            continue
-        path = Path(row["path"])
-        try:
-            data = path.read_bytes()
-        except OSError:
-            failed.append(row["name"])
-            continue
-        try:
-            meta = remote.request("POST", "/api/files", {
-                "name": row["name"],
-                "upload_id": row["id"],
-                "base64": base64.b64encode(data).decode(),
-            })
-        except RemoteError:
-            failed.append(row["name"])
-            continue
-        store.file_ack(profile, row["id"], meta["id"])
-        uploaded += 1
+    with store.file_sync_lock:
+        for row in store.pending_files(profile):
+            path = Path(row["path"])
+            try:
+                data = path.read_bytes()
+            except OSError as exc:
+                failed.append(row["name"])
+                store.file_failed(profile, row["id"], exc)
+                continue
+            try:
+                meta = remote.request("POST", "/api/files", {
+                    "name": row["name"],
+                    "upload_id": row["id"],
+                    "base64": base64.b64encode(data).decode(),
+                })
+            except RemoteError as exc:
+                failed.append(row["name"])
+                store.file_failed(profile, row["id"], exc)
+                if exc.status == 0:
+                    break
+                continue
+            store.file_ack(profile, row["id"], meta["id"])
+            uploaded += 1
     return {"uploaded": uploaded, "failed_files": failed}

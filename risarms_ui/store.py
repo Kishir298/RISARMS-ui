@@ -16,11 +16,18 @@ def revision(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def retry_delay(attempts):
+    return min(300.0, 5.0 * (2 ** max(0, min(int(attempts), 6))))
+
+
 class LocalStore:
     def __init__(self, directory):
         self.directory = Path(directory).expanduser().resolve()
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.lock = threading.RLock()
+        self.record_sync_lock = threading.Lock()
+        self.file_sync_lock = threading.Lock()
+        self.message_sync_lock = threading.Lock()
         self.db = sqlite3.connect(self.directory / "desktop.sqlite3", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript('''
@@ -36,6 +43,15 @@ class LocalStore:
         ''')
         if "remote_role" not in {r[1] for r in self.db.execute("PRAGMA table_info(profiles)")}:
             self.db.execute("ALTER TABLE profiles ADD COLUMN remote_role TEXT DEFAULT 'local'")
+        for table, columns in {
+            "records": (("attempts", "INTEGER NOT NULL DEFAULT 0"), ("next_attempt", "REAL NOT NULL DEFAULT 0"), ("error", "TEXT NOT NULL DEFAULT ''")),
+            "files": (("attempts", "INTEGER NOT NULL DEFAULT 0"), ("next_attempt", "REAL NOT NULL DEFAULT 0"), ("error", "TEXT NOT NULL DEFAULT ''")),
+            "messages": (("attempts", "INTEGER NOT NULL DEFAULT 0"), ("next_attempt", "REAL NOT NULL DEFAULT 0")),
+        }.items():
+            existing = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+            for name, definition in columns:
+                if name not in existing:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
         self.db.commit()
         if os.name == "posix":
             self.directory.chmod(0o700)
@@ -100,8 +116,10 @@ class LocalStore:
         if len(raw.encode()) > 200000:
             raise ValueError("Record exceeds the local size limit.")
         with self.lock, self.db:
-            self.db.execute('''INSERT INTO records VALUES(?,?,?,?,?,1)
-              ON CONFLICT(profile,service,key) DO UPDATE SET value=excluded.value,pending=1''', (profile, service, key, raw, ""))
+            self.db.execute('''INSERT INTO records(profile,service,key,value,base,pending)
+              VALUES(?,?,?,?,?,1)
+              ON CONFLICT(profile,service,key) DO UPDATE SET value=excluded.value,pending=1,
+              attempts=0,next_attempt=0,error='' ''', (profile, service, key, raw, ""))
 
     def records(self, profile, service=None, pending=False):
         query, params = "SELECT * FROM records WHERE profile=?", [profile]
@@ -112,10 +130,32 @@ class LocalStore:
         with self.lock:
             return [{**dict(row), "value": json.loads(row["value"])} for row in self.db.execute(query + " ORDER BY service,key", params)]
 
+    def pending_records(self, profile, now=None):
+        now = time.time() if now is None else now
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT * FROM records WHERE profile=? AND pending=1 AND next_attempt<=? ORDER BY service,key",
+                (profile, now),
+            )
+            return [{**dict(row), "value": json.loads(row["value"])} for row in rows]
+
+    def record_failed(self, profile, service, key, error):
+        with self.lock, self.db:
+            row = self.db.execute(
+                "SELECT attempts FROM records WHERE profile=? AND service=? AND key=?",
+                (profile, service, key),
+            ).fetchone()
+            attempts = (row["attempts"] if row else 0) + 1
+            self.db.execute(
+                "UPDATE records SET attempts=?,next_attempt=?,error=? WHERE profile=? AND service=? AND key=?",
+                (attempts, time.time() + retry_delay(attempts), str(error)[:500], profile, service, key),
+            )
+
     def cache(self, profile, service, rows):
         with self.lock, self.db:
             for row in rows:
-                self.db.execute('''INSERT INTO records VALUES(?,?,?,?,?,0)
+                self.db.execute('''INSERT INTO records(profile,service,key,value,base,pending)
+                  VALUES(?,?,?,?,?,0)
                   ON CONFLICT(profile,service,key) DO UPDATE SET value=excluded.value,base=excluded.base
                   WHERE records.pending=0''', (profile, service, row["key"], json.dumps(row["value"]), revision(row["value"])))
 
@@ -125,7 +165,7 @@ class LocalStore:
             current = self.db.execute("SELECT value FROM records WHERE profile=? AND service=? AND key=?", (profile, item["service"], item["key"])).fetchone()
             if current:
                 clean = json.loads(current["value"]) == item["value"]
-                self.db.execute("UPDATE records SET base=?,pending=? WHERE profile=? AND service=? AND key=?",
+                self.db.execute("UPDATE records SET base=?,pending=?,attempts=0,next_attempt=0,error='' WHERE profile=? AND service=? AND key=?",
                     (revision(saved["value"]), 0 if clean else 1, profile, item["service"], item["key"]))
 
     def history(self, profile):
@@ -148,15 +188,32 @@ class LocalStore:
         path=home/identity;path.write_bytes(data)
         if os.name=="posix":path.chmod(0o600)
         with self.lock,self.db:
-            self.db.execute("INSERT INTO files VALUES(?,?,?,?,?,?)",(identity,profile,Path(name).name,str(path),remote_id,0 if remote_id else 1))
+            self.db.execute("INSERT INTO files(id,profile,name,path,remote_id,pending) VALUES(?,?,?,?,?,?)",(identity,profile,Path(name).name,str(path),remote_id,0 if remote_id else 1))
         return identity
 
     def files(self, profile):
         with self.lock:return [dict(r) for r in self.db.execute("SELECT * FROM files WHERE profile=? ORDER BY name",(profile,))]
 
+    def pending_files(self, profile, now=None):
+        now = time.time() if now is None else now
+        with self.lock:
+            return [dict(r) for r in self.db.execute(
+                "SELECT * FROM files WHERE profile=? AND pending=1 AND next_attempt<=? ORDER BY name",
+                (profile, now),
+            )]
+
+    def file_failed(self, profile, identity, error):
+        with self.lock, self.db:
+            row = self.db.execute("SELECT attempts FROM files WHERE profile=? AND id=?", (profile, identity)).fetchone()
+            attempts = (row["attempts"] if row else 0) + 1
+            self.db.execute(
+                "UPDATE files SET attempts=?,next_attempt=?,error=? WHERE profile=? AND id=?",
+                (attempts, time.time() + retry_delay(attempts), str(error)[:500], profile, identity),
+            )
+
     def file_ack(self, profile, identity, remote_id):
         with self.lock,self.db:
-            self.db.execute("UPDATE files SET pending=0,remote_id=? WHERE profile=? AND id=?",(remote_id,profile,identity))
+            self.db.execute("UPDATE files SET pending=0,remote_id=?,attempts=0,next_attempt=0,error='' WHERE profile=? AND id=?",(remote_id,profile,identity))
 
     # ------------------------------------------------------------- messaging
     def queue_message(self, profile, peer, body):
@@ -170,7 +227,7 @@ class LocalStore:
         identity = uuid.uuid4().hex
         with self.lock, self.db:
             self.db.execute(
-                "INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO messages(id,profile,peer,direction,body,created,status,remote_id,error) VALUES(?,?,?,?,?,?,?,?,?)",
                 (identity, profile, peer.strip(), "out", body, time.time(), "queued", "", ""),
             )
         return identity
@@ -211,6 +268,23 @@ class LocalStore:
                 (profile,),
             ).fetchone()[0]
 
+    def pending_messages(self, profile, now=None):
+        now = time.time() if now is None else now
+        with self.lock:
+            return [dict(row) for row in self.db.execute(
+                "SELECT * FROM messages WHERE profile=? AND direction='out' AND status='queued' AND next_attempt<=? ORDER BY created,id",
+                (profile, now),
+            )]
+
+    def message_failed(self, profile, identity, error):
+        with self.lock, self.db:
+            row = self.db.execute("SELECT attempts FROM messages WHERE profile=? AND id=?", (profile, identity)).fetchone()
+            attempts = (row["attempts"] if row else 0) + 1
+            self.db.execute(
+                "UPDATE messages SET attempts=?,next_attempt=?,error=? WHERE profile=? AND id=?",
+                (attempts, time.time() + retry_delay(attempts), str(error)[:500], profile, identity),
+            )
+
     def flush_messages(self, profile, remote):
         """Send queued messages once; failures stay queued for the next cycle.
 
@@ -219,30 +293,30 @@ class LocalStore:
         never reported as delivered.
         """
         sent = 0
-        for row in self.messages(profile):
-            if row["direction"] != "out" or row["status"] != "queued":
-                continue
-            try:
-                result = remote.request(
-                    "POST", "/api/messages",
-                    {"recipient": row["peer"], "body": row["body"], "client_id": row["id"]},
-                    idempotency_key=row["id"],
-                )
-            except Exception as exc:
-                # Transport failures retry; explicit rejections are marked failed.
-                if getattr(exc, "status", 0) in (400, 403, 404):
-                    with self.lock, self.db:
-                        self.db.execute(
-                            "UPDATE messages SET status='failed',error=? WHERE profile=? AND id=?",
-                            (str(exc)[:500], profile, row["id"]),
-                        )
-                continue
-            with self.lock, self.db:
-                self.db.execute(
-                    "UPDATE messages SET status=?,remote_id=?,error='' WHERE profile=? AND id=?",
-                    (result.get("status", "sent"), result.get("id", ""), profile, row["id"]),
-                )
-            sent += 1
+        with self.message_sync_lock:
+            for row in self.pending_messages(profile):
+                try:
+                    result = remote.request(
+                        "POST", "/api/messages",
+                        {"recipient": row["peer"], "body": row["body"], "client_id": row["id"]},
+                        idempotency_key=row["id"],
+                    )
+                except Exception as exc:
+                    if getattr(exc, "status", 0) in (400, 403, 404):
+                        with self.lock, self.db:
+                            self.db.execute(
+                                "UPDATE messages SET status='failed',error=? WHERE profile=? AND id=?",
+                                (str(exc)[:500], profile, row["id"]),
+                            )
+                    else:
+                        self.message_failed(profile, row["id"], exc)
+                    continue
+                with self.lock, self.db:
+                    self.db.execute(
+                        "UPDATE messages SET status=?,remote_id=?,error='',attempts=0,next_attempt=0 WHERE profile=? AND id=?",
+                        (result.get("status", "sent"), result.get("id", ""), profile, row["id"]),
+                    )
+                sent += 1
         return sent
 
     def record_incoming(self, profile, peer, rows):
@@ -259,7 +333,7 @@ class LocalStore:
                 if exists:
                     continue
                 self.db.execute(
-                    "INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO messages(id,profile,peer,direction,body,created,status,remote_id,error) VALUES(?,?,?,?,?,?,?,?,?)",
                     ("srv-" + remote_id, profile, peer, "in", row.get("body", ""),
                      float(row.get("created", time.time())), "read" if row.get("read") else "delivered",
                      remote_id, ""),

@@ -7,9 +7,6 @@ from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH).resolve().parent
 HIDDEN = [
-    "client.inference",
-    "client.model_support",
-    "client.web",
     "websockets.sync.client",
     "keyring.backends",
     "keyring.backends.macOS",

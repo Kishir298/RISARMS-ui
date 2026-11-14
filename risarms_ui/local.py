@@ -1,27 +1,89 @@
 """Local Ollama and explicit standalone service execution; no CORE imports."""
 import codecs
+import json
 import os
 import signal
 import subprocess
 import threading
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
+
+DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+
+
+def _ollama_host():
+    host = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST).strip().rstrip("/")
+    parsed = urlparse(host)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("OLLAMA_HOST must be an http:// or https:// origin.")
+    if parsed.username or parsed.password:
+        raise ValueError("OLLAMA_HOST must not contain credentials.")
+    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+        raise ValueError("OLLAMA_HOST must not contain a path, query or fragment.")
+    return host
+
+
+class OllamaChatStream:
+    """Minimal streaming client for Ollama's ``/api/chat`` endpoint."""
+
+    def __init__(self, model, messages, timeout=300):
+        self.model = model
+        self.messages = messages
+        self.timeout = timeout
+        self.response = None
+
+    def __enter__(self):
+        body = json.dumps({
+            "model": self.model,
+            "messages": self.messages,
+            "stream": True,
+        }).encode("utf-8")
+        request = Request(
+            _ollama_host() + "/api/chat",
+            data=body,
+            method="POST",
+            headers={"Accept": "application/x-ndjson", "Content-Type": "application/json"},
+        )
+        try:
+            self.response = urlopen(request, timeout=self.timeout)
+        except HTTPError as exc:
+            detail = exc.read(4096).decode("utf-8", "replace")
+            raise RuntimeError(f"Ollama rejected the request (HTTP {exc.code}): {detail}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Cannot reach local Ollama at {_ollama_host()}: {exc.reason}") from exc
+        return self
+
+    def __iter__(self):
+        if self.response is None:
+            raise RuntimeError("Ollama stream is not open.")
+        for raw in self.response:
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError as exc:
+                raise RuntimeError("Ollama returned malformed streaming JSON.") from exc
+            if event.get("error"):
+                raise RuntimeError(str(event["error"]))
+            yield event
+            if event.get("done"):
+                break
+
+    def close(self):
+        response, self.response = self.response, None
+        if response is not None:
+            response.close()
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
 
 
 def chat_stream():
-    """Load CORE-CLIENT's streaming client lazily.
-
-    The desktop package must import without CORE-CLIENT installed (the
-    ``client`` name also belongs to this repository's legacy portal package),
-    so the dependency is resolved only when local inference actually runs.
-    """
-    try:
-        from client.inference import ChatStream
-    except ImportError as exc:  # pragma: no cover - depends on install shape
-        raise RuntimeError(
-            "Local AI needs the CORE-CLIENT library (the 'core-client' package). "
-            "Install it, or use CORE-HOST mode."
-        ) from exc
-    return ChatStream
+    return OllamaChatStream
 
 
 class LocalRunner:
