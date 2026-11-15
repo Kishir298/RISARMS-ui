@@ -76,7 +76,9 @@ jobs:
         run: python -c "import tkinter; print('Tk', tkinter.TkVersion)"
 
       - name: Build artifacts and native installers
-        run: python packaging/build.py
+        run: |
+          python packaging/build.py
+          python packaging/sbom.py --output dist/sbom.cdx.json
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -90,4 +92,51 @@ jobs:
             dist/*.AppImage
             dist/*.deb
             dist/SHA256SUMS
+            dist/sbom.cdx.json
           if-no-files-found: error
+
+  publish:
+    name: Publish signed release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the desktop application
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install manifest signer
+        run: python -m pip install --upgrade pip cryptography
+
+      - name: Download packaged installers
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate signed update manifest
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          mkdir -p release
+          find artifacts -type f -maxdepth 2 -exec cp {} release/ \;
+          python packaging/release_manifest.py \
+            --dist release \
+            --version "$(raw="${GITHUB_REF_NAME#v}"; echo "${raw%%-*}")" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --tag "${GITHUB_REF_NAME}" \
+            --channel "$(case "${GITHUB_REF_NAME}" in *-beta*) echo beta;; *) echo stable;; esac)"
+
+      - name: Upload GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+          gh release upload "${GITHUB_REF_NAME}" release/* --clobber

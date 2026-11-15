@@ -60,6 +60,14 @@ def _doctor() -> int:
         failures.append("websockets")
 
     try:
+        import cryptography
+
+        checks["cryptography"] = cryptography.__version__
+    except Exception as exc:
+        checks["cryptography"] = f"missing: {exc}"
+        failures.append("cryptography")
+
+    try:
         from .paths import config_directory, data_directory
 
         for path in (config_directory(), data_directory()):

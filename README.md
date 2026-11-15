@@ -41,7 +41,12 @@ CSRF, audit, storage scope or owner re-authentication.
   TIVISS workspace.
 - Task jobs with output polling, cancellation and idempotent server creation.
 - Owner-only administration for accounts, access requests, audit, quotas,
-  settings and server status.
+  settings, server status and a queued owner-action inbox. Approval requires a
+  registered owner device plus password re-authentication.
+- Local ASCS/ASIS actions ask through a loopback approval dialog; closing it,
+  timing out, or losing the broker denies the action.
+- Ed25519-verified GitHub Releases update manifests with hash-checked
+  downloads. Updates are never installed silently.
 - Light/dark themes, responsive scrolling, keyboard basics and single-instance
   protection.
 - PyInstaller one-directory builds for macOS, Windows and Linux, with optional
@@ -71,7 +76,8 @@ python3 -m venv .venv
 ```
 
 `--doctor` checks Tk, the display, keyring, websockets and writable application
-directories without opening a window. CORE-CLIENT is not required.
+directories without opening a window. CORE-CLIENT is not required. Local chat
+uses Ollama directly; signed update checking uses `cryptography`.
 
 ## Tests and lint
 
@@ -129,7 +135,7 @@ risarms_ui/
 ├── entrypoint.py     CLI, --doctor, GUI startup
 ├── jobs.py           server job polling and local execution
 ├── layout.py         DPI-aware geometry and scrolling
-├── local.py          local Ollama/service runner (from CORE-CLIENT)
+├── local.py          local Ollama/service runner (stdlib, no CORE imports)
 ├── paths.py          platform application directories
 ├── remote.py         authenticated sync helpers
 ├── store.py          offline SQLite profiles/records/files/history
@@ -150,8 +156,8 @@ risarms_ui/
 
 | Item | Status |
 |---|---|
-| UI/HTTP/connection tests | IMPLEMENTED (205 passed) |
-| CORE-HOST desktop control contracts | IMPLEMENTED (865 passed / 1 skipped) |
+| UI/HTTP/connection tests | IMPLEMENTED (254 passed) |
+| CORE-HOST desktop control contracts | IMPLEMENTED (892 passed / 4 skipped) |
 | Tk GUI launch in this workspace | PENDING (Tk installation incomplete) |
 | Physical Windows run | NOT YET PERFORMED |
 | Physical Linux run | NOT YET PERFORMED |

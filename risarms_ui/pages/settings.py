@@ -3,7 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from .. import __version__
+from .. import __version__, updates
 from ..widgets import button, field, row
 from .base import Page
 
@@ -59,6 +59,22 @@ class SettingsPage(Page):
         ttk.Label(storage, text="Local-only data is never uploaded automatically. Pending records require explicit Sync.",
                   style="Muted.TLabel").pack(anchor="w", padx=10, pady=(0, 8))
 
+        update_frame = ttk.LabelFrame(self.body, text="Updates")
+        update_frame.pack(fill="x", pady=(0, 10))
+        self.update_url = field(update_frame, "Signed update manifest URL",
+                                self.app.preferences.get("update_url", "https://github.com/Kishir298/RISARMS-ui/releases/latest/download/update.json"))
+        self.update_key = field(update_frame, "Ed25519 public key (base64)",
+                                self.app.preferences.get("update_key", ""))
+        row_update = tk.Frame(update_frame, background=self.colors["bg"])
+        row_update.pack(fill="x", padx=10, pady=8)
+        ttk.Label(row_update, text="Channel").pack(side="left", padx=(0, 8))
+        self.update_channel = ttk.Combobox(row_update, state="readonly", values=("stable", "beta"), width=10)
+        self.update_channel.set(self.app.preferences.get("update_channel", "stable"))
+        self.update_channel.pack(side="left")
+        ttk.Button(row_update, text="Check for updates", command=self.check_updates).pack(side="left", padx=8)
+        ttk.Label(update_frame, text="Updates are checked and verified only; installation is never automatic.",
+                  style="Muted.TLabel").pack(anchor="w", padx=10, pady=(0, 8))
+
         security = ttk.LabelFrame(self.body, text="Security")
         security.pack(fill="x", pady=(0, 10))
         ttk.Label(security, text="The local profile passphrase is an application lock, not disk encryption. Use full-disk encryption for local data.",
@@ -73,6 +89,28 @@ class SettingsPage(Page):
         self.app.apply_theme(self.theme.get())
         self.app.save_preferences()
 
+    def check_updates(self):
+        url = self.update_url.get().strip()
+        key = self.update_key.get().strip()
+        channel = self.update_channel.get()
+        if not key:
+            messagebox.showerror("Updates", "Configure the Ed25519 public key first.")
+            return
+
+        def work():
+            found = updates.fetch_manifest(url, key, channel=channel)
+            return found, updates.update_available(__version__, found)
+
+        def done(result):
+            found, available = result
+            messagebox.showinfo(
+                "Updates",
+                f"Latest {found.channel} version: {found.version}\n"
+                + ("An update is available." if available else "This installation is current."),
+            )
+
+        self.app.run_async(work, done, self.app.show_error)
+
     def save(self):
         self.app.preferences.update({
             "theme": self.theme.get(),
@@ -80,6 +118,9 @@ class SettingsPage(Page):
             "ca_file": self.ca_file.get().strip(),
             "model": self.model.get().strip(),
             "chat_storage": self.chat_storage.get(),
+            "update_url": self.update_url.get().strip(),
+            "update_key": self.update_key.get().strip(),
+            "update_channel": self.update_channel.get(),
         })
         for name, entry in self.paths.items():
             self.app.preferences[name] = entry.get().strip()

@@ -8,6 +8,7 @@ version = "0.6.0"
 description = "R.I.S.A.R.M.S. unified desktop application for C.O.R.E. and its subsystems"
 requires-python = ">=3.10"
 dependencies = [
+  "cryptography>=42.0",
   "keyring>=24.0",
   "websockets>=12.0",
 ]
