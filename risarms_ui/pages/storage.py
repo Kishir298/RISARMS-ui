@@ -41,6 +41,10 @@ class StoragePage(Page):
         self.refresh()
 
     def refresh(self):
+        services = self.app.record_services()
+        self.service.configure(values=services)
+        if self.service.get() not in services:
+            self.service.set(services[0])
         rows = self.app.store.records(self.app.profile, self.service.get())
         self.visible = rows
         self.record_list.delete(0, "end")

@@ -15,6 +15,7 @@ import queue
 import shutil
 import socket
 import threading
+import time
 import tkinter as tk
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -23,7 +24,7 @@ from tkinter import messagebox, ttk
 from . import APP_NAME, __version__
 from .approvals import ApprovalBroker, approval_signature
 from .approvals_dialog import ask as ask_approval
-from .authorization import service_allowed
+from .authorization import available_services, service_allowed
 from .connection.api import APIError, validate_origin
 from .connection.manager import ConnectionManager
 from .connection.states import ConnectionState
@@ -136,6 +137,8 @@ class App:
         self.ui_queue: queue.Queue = queue.Queue()
         self.active_jobs = set()
         self.approval_session = set()
+        self._grants_refreshing = False
+        self._grants_refreshed_at = 0.0
         self.profile = ""
         self.local_name = ""
         self.store = LocalStore(self.data_directory)
@@ -480,14 +483,22 @@ class App:
     def service_allowed(self, service: str) -> bool:
         return service_allowed(service, owner=self.is_owner(), profile=self.profile, store=self.store)
 
-    def refresh_service_grants(self):
+    def refresh_service_grants(self, force=False):
         if not self.profile or self.connection.state is not ConnectionState.ONLINE:
             return
+        if self._grants_refreshing:
+            return
+        now = time.monotonic()
+        if not force and now - self._grants_refreshed_at < 60:
+            return
+        self._grants_refreshing = True
 
         def work():
             return self.require_remote().request("GET", "/api/service-grants")
 
         def done(data):
+            self._grants_refreshing = False
+            self._grants_refreshed_at = time.monotonic()
             profile = self.connection.profile or {}
             entry = next(
                 (row for row in data.get("grants", []) if row.get("profile_id") == profile.get("id")),
@@ -497,12 +508,14 @@ class App:
                 self.store.cache_service_grants(self.profile, entry.get("services", []))
                 self.refresh_current()
 
-        self.run_async(work, done, lambda exc: _LOG.info("Service grants unavailable: %s", exc))
+        def failed(exc):
+            self._grants_refreshing = False
+            _LOG.info("Service grants unavailable: %s", exc)
+
+        self.run_async(work, done, failed)
 
     def record_services(self) -> tuple:
-        if self.is_owner():
-            return ("workspace", "asis", "ascs", "tiviss", "rescs")
-        return ("workspace", "asis")
+        return available_services(owner=self.is_owner(), profile=self.profile, store=self.store)
 
     # ------------------------------------------------------------------ connection
     def _auto_connect(self):
@@ -552,7 +565,7 @@ class App:
             self.show_error(exc)
             return
         self.persist_server(server)
-        self.refresh_service_grants()
+        self.refresh_service_grants(force=True)
         self.account_label.set(f"{profile.get('name', profile.get('username', 'Account'))} · {profile.get('role', 'member')}")
         self._update_role_visibility()
         self._set_status(f"Online · {server}")
@@ -723,6 +736,7 @@ class App:
         if self.closing:
             return
         try:
+            self.refresh_service_grants()
             self._sync_if_needed()
         finally:
             if not self.closing:

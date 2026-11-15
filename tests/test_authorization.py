@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from risarms_ui.authorization import service_allowed
+from risarms_ui.authorization import available_services, service_allowed
 from risarms_ui.store import LocalStore
 
 PASSWORD = "long-enough-passphrase"
@@ -23,6 +23,12 @@ def test_cached_grant_allows_only_listed_services(tmp_path):
         assert store.service_allowed(profile, "ascs") is True
         assert store.service_allowed(profile, "tiviss") is False
         assert store.service_grants(profile) == {"asis": True, "ascs": True}
+        assert available_services(owner=False, profile=profile, store=store) == (
+            "workspace", "asis", "ascs",
+        )
+        assert available_services(owner=True, profile=profile, store=store) == (
+            "workspace", "asis", "ascs", "tiviss", "rescs",
+        )
     finally:
         store.close()
 
