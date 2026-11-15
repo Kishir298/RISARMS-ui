@@ -111,7 +111,7 @@ class LocalRunner:
             with self.lock: self.response = None
 
     @staticmethod
-    def command(service, root, home, prompt, model, mode="plan"):
+    def command(service, root, home, prompt, model, mode="plan", extra_env=None):
         if service not in ("asis", "ascs", "tiviss"):
             raise ValueError("Only installed ASIS, ASCS or TIVISS can run locally.")
         root, home = Path(root).expanduser().resolve(), Path(home).resolve()
@@ -141,11 +141,13 @@ class LocalRunner:
                 TIVISS_MEMORY_SEMANTIC_DB=str(home / "tiviss-semantic.sqlite3"), TIVISS_OWNER_ID=home.name,
                 TIVISS_CORE_ENABLED="false", TIVISS_RESCS_ENABLED="false")
             argv = [str(python), "-u", "-m", "tiviss", "--message=" + prompt]
+        if extra_env:
+            env.update({str(key): str(value) for key, value in extra_env.items()})
         if service in ("asis", "ascs") and model: argv[4:4] = ["--model=" + model]
         return argv, root, env
 
-    def service(self, service, root, home, prompt, model, emit, mode="plan"):
-        argv, cwd, env = self.command(service, root, home, prompt, model, mode)
+    def service(self, service, root, home, prompt, model, emit, mode="plan", extra_env=None):
+        argv, cwd, env = self.command(service, root, home, prompt, model, mode, extra_env)
         with self.lock:
             if self.cancel.is_set(): return "cancelled"
             self.process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

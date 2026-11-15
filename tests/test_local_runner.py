@@ -83,3 +83,19 @@ def test_local_runner_streams_without_core_client(monkeypatch):
 
     assert result == "completed"
     assert output == ["answer"]
+
+
+def test_local_runner_passes_approval_environment(tmp_path):
+    root = tmp_path / "ascs"
+    (root / "agent").mkdir(parents=True)
+    python = root / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("")
+
+    _argv, _cwd, env = local.LocalRunner.command(
+        "ascs", root, tmp_path / "home", "task", "", "plan",
+        {"RISARMS_APPROVAL_URL": "http://127.0.0.1:1/approve", "RISARMS_APPROVAL_TOKEN": "t"},
+    )
+    assert env["RISARMS_APPROVAL_URL"] == "http://127.0.0.1:1/approve"
+    assert env["RISARMS_APPROVAL_TOKEN"] == "t"
+    assert env["AGENT_NONINTERACTIVE"] == "1"

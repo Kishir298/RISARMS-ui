@@ -6,6 +6,7 @@ block the interface.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -20,6 +21,9 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from . import APP_NAME, __version__
+from .approvals import ApprovalBroker
+from .approvals_dialog import ask as ask_approval
+from .authorization import service_allowed
 from .connection.api import APIError, validate_origin
 from .connection.manager import ConnectionManager
 from .connection.states import ConnectionState
@@ -131,6 +135,7 @@ class App:
         )
         self.ui_queue: queue.Queue = queue.Queue()
         self.active_jobs = set()
+        self.approval_session = set()
         self.profile = ""
         self.local_name = ""
         self.store = LocalStore(self.data_directory)
@@ -139,6 +144,7 @@ class App:
         self.colors = palette(self.preferences.get("theme", "light"))
         self.root = tk.Tk()
         self.root.withdraw()
+        self.approvals = ApprovalBroker(self._request_approval)
         self.root.title(APP_NAME)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.report_callback_exception = self._tk_error
@@ -471,6 +477,28 @@ class App:
             return profile["role"] == "owner"
         return self.binding_role() == "owner"
 
+    def service_allowed(self, service: str) -> bool:
+        return service_allowed(service, owner=self.is_owner(), profile=self.profile, store=self.store)
+
+    def refresh_service_grants(self):
+        if not self.profile or self.connection.state is not ConnectionState.ONLINE:
+            return
+
+        def work():
+            return self.require_remote().request("GET", "/api/service-grants")
+
+        def done(data):
+            profile = self.connection.profile or {}
+            entry = next(
+                (row for row in data.get("grants", []) if row.get("profile_id") == profile.get("id")),
+                None,
+            )
+            if entry is not None:
+                self.store.cache_service_grants(self.profile, entry.get("services", []))
+                self.refresh_current()
+
+        self.run_async(work, done, lambda exc: _LOG.info("Service grants unavailable: %s", exc))
+
     def record_services(self) -> tuple:
         if self.is_owner():
             return ("workspace", "asis", "ascs", "tiviss", "rescs")
@@ -524,6 +552,7 @@ class App:
             self.show_error(exc)
             return
         self.persist_server(server)
+        self.refresh_service_grants()
         self.account_label.set(f"{profile.get('name', profile.get('username', 'Account'))} · {profile.get('role', 'member')}")
         self._update_role_visibility()
         self._set_status(f"Online · {server}")
@@ -618,6 +647,25 @@ class App:
     def post_ui(self, kind: str, payload):
         self.ui_queue.put((kind, payload))
 
+    def approval_env(self, job_id=""):
+        return self.approvals.env(job_id)
+
+    def _request_approval(self, payload):
+        signature = (
+            str(payload.get("service", "")),
+            str(payload.get("action", "")),
+            str(payload.get("command", "")),
+            str(payload.get("workspace", "")),
+        )
+        if signature in self.approval_session:
+            return {"decision": "allow_session", "reason": "approved earlier in this session"}
+        future = concurrent.futures.Future()
+        self.post_ui("approval", (payload, future))
+        try:
+            return future.result(timeout=120)
+        except concurrent.futures.TimeoutError:
+            return {"decision": "deny", "reason": "approval timed out"}
+
     def run_async(self, work, done=None, error=None):
         def runner():
             try:
@@ -660,6 +708,21 @@ class App:
                 elif kind == "job_error":
                     page, exc = payload
                     page.job_failed(exc) if hasattr(page, "job_failed") else page.fail(exc)
+                elif kind == "approval":
+                    payload_data, future = payload
+                    try:
+                        decision = ask_approval(self.root, payload_data)
+                    except Exception:
+                        _LOG.exception("Approval dialog failed")
+                        decision = "deny"
+                    if decision == "allow_session":
+                        self.approval_session.add((
+                            str(payload_data.get("service", "")),
+                            str(payload_data.get("action", "")),
+                            str(payload_data.get("command", "")),
+                            str(payload_data.get("workspace", "")),
+                        ))
+                    future.set_result({"decision": decision, "reason": "desktop decision"})
                 elif kind == "call":
                     payload()
             except Exception:
@@ -851,6 +914,10 @@ class App:
             self.save_preferences()
         except Exception:
             pass
+        try:
+            self.approvals.close()
+        except Exception:
+            _LOG.exception("Approval broker close failed")
         try:
             self.connection.close()
         except Exception:

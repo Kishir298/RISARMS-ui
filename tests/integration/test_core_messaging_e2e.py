@@ -135,7 +135,7 @@ class CoreClient:
             return error.code, json.loads(error.read() or b"{}")
 
     def sign_in(self, username: str) -> "CoreClient":
-        status, body = self.call("POST", "/api/login", {"username": username, "password": PASSWORD})
+        status, body = self.call("POST", "/api/login", {"username": username, "password": PASSWORD, "remember_device": True})
         assert status == 200, (status, body)
         self.csrf = body["csrf"]
         self.profile = body["profile"]

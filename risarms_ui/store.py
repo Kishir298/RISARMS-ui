@@ -40,6 +40,9 @@ class LocalStore:
           direction TEXT NOT NULL,body TEXT NOT NULL,created REAL NOT NULL,status TEXT NOT NULL,
           remote_id TEXT,error TEXT);
         CREATE INDEX IF NOT EXISTS messages_thread ON messages(profile,peer,created);
+        CREATE TABLE IF NOT EXISTS service_grants(profile TEXT NOT NULL,service TEXT NOT NULL,
+          allowed INTEGER NOT NULL DEFAULT 0,updated REAL NOT NULL,expires REAL NOT NULL,
+          PRIMARY KEY(profile,service));
         ''')
         if "remote_role" not in {r[1] for r in self.db.execute("PRAGMA table_info(profiles)")}:
             self.db.execute("ALTER TABLE profiles ADD COLUMN remote_role TEXT DEFAULT 'local'")
@@ -108,6 +111,30 @@ class LocalStore:
             row = self.db.execute(
                 "SELECT id,name,server,remote_id,remote_role FROM profiles WHERE id=?", (profile,)).fetchone()
             return dict(row) if row else None
+
+    def cache_service_grants(self, profile, services, ttl=7 * 24 * 3600):
+        now = time.time()
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM service_grants WHERE profile=?", (profile,))
+            for service in services:
+                self.db.execute(
+                    "INSERT INTO service_grants(profile,service,allowed,updated,expires) VALUES(?,?,1,?,?)",
+                    (profile, str(service), now, now + ttl),
+                )
+
+    def service_grants(self, profile):
+        with self.lock:
+            return {row["service"]: bool(row["allowed"]) for row in self.db.execute(
+                "SELECT service,allowed FROM service_grants WHERE profile=?", (profile,))}
+
+    def service_allowed(self, profile, service, now=None):
+        now = time.time() if now is None else now
+        with self.lock:
+            row = self.db.execute(
+                "SELECT allowed,expires FROM service_grants WHERE profile=? AND service=?",
+                (profile, service),
+            ).fetchone()
+            return bool(row and row["allowed"] and row["expires"] > now)
 
     def save(self, profile, service, key, value):
         if not re.fullmatch(r"[a-z0-9_-]{1,32}", service) or not isinstance(key, str) or not 1 <= len(key) <= 200 or not isinstance(value, dict):

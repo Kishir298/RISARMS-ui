@@ -4,6 +4,8 @@ import json
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
+from ..connection.states import ConnectionState
+from ..owner_actions import summarize_action
 from ..widgets import row as action_row
 from .base import Page
 
@@ -38,7 +40,22 @@ class AdministrationPage(Page):
         self.body_text.pack(fill="x", padx=10, pady=6)
         ttk.Button(jobs, text="Run owner action", command=self.run_action).pack(anchor="w", padx=10, pady=(0, 8))
 
-        self.output = tk.Text(self.body, width=1, height=16, wrap="word", state="disabled")
+        queue = ttk.LabelFrame(self.body, text="Queued owner approvals")
+        queue.pack(fill="x", pady=(0, 10))
+        self.queue_list = tk.Listbox(queue, width=1, height=4)
+        self.queue_list.pack(fill="x", padx=10, pady=6)
+        self.queue_list.bind("<<ListboxSelect>>", self.show_selected_action)
+        ttk.Label(queue, text="Selected request details (review before deciding)", style="Muted.TLabel").pack(anchor="w", padx=10)
+        self.queue_detail = tk.Text(queue, width=1, height=10, wrap="word", state="disabled")
+        self.queue_detail.pack(fill="x", padx=10, pady=6)
+        queue_actions = action_row(queue)
+        for label, decision in (("Refresh queue", None), ("Approve selected", "approve"), ("Reject selected", "reject")):
+            tk.Button(queue_actions, text=label, command=lambda decision=decision: self.decide(decision)).pack(side="left", padx=(0, 5))
+        queue_actions.pack_configure(padx=10, pady=(0, 8))
+        self.pending_actions = []
+        self.set_text(self.queue_detail, "Select a queued request to review the full action and payload.")
+
+        self.output = tk.Text(self.body, width=1, height=12, wrap="word", state="disabled")
         self.output.pack(fill="both", expand=True)
         self.members = []
 
@@ -101,5 +118,78 @@ class AdministrationPage(Page):
         self.app.run_async(lambda: self.request(password, method, path, body),
                            lambda data: self.set_text(self.output, json.dumps(data, indent=2)), self.app.show_error)
 
+    def load_queue(self):
+        if self.app.connection.state is not ConnectionState.ONLINE:
+            self.set_text(self.queue_detail, "Connect to CORE to review queued owner actions.")
+            return
+
+        def work():
+            return self.app.require_remote().request("GET", "/api/owner-actions", None)
+
+        def done(data):
+            self.pending_actions = data.get("actions", [])
+            self.queue_list.delete(0, "end")
+            for item in self.pending_actions:
+                self.queue_list.insert("end", f"{item.get('action')} · {item.get('requested_by', '')[:8]} · {item.get('id')[:8]}")
+            if self.pending_actions:
+                self.queue_list.selection_set(0)
+                self.queue_list.activate(0)
+                self.show_selected_action()
+            else:
+                self.set_text(self.queue_detail, "No queued owner actions. Select Refresh queue to check again.")
+
+        self.app.run_async(work, done, lambda exc: self.set_text(self.queue_detail, f"Queue unavailable: {exc}"))
+
+    def show_selected_action(self, _event=None):
+        selected = self.queue_list.curselection()
+        if not selected or selected[0] >= len(self.pending_actions):
+            self.set_text(self.queue_detail, "Select a queued request to review the full action and payload.")
+            return
+        self.set_text(self.queue_detail, summarize_action(self.pending_actions[selected[0]]))
+
+    def decide(self, decision):
+        if decision is None:
+            self.load_queue()
+            return
+        selected = self.queue_list.curselection()
+        if not selected:
+            messagebox.showerror("Owner actions", "Select a queued request first.")
+            return
+        try:
+            item = self.pending_actions[selected[0]]
+        except IndexError:
+            messagebox.showerror("Owner actions", "The queue changed. Refresh and select the request again.")
+            return
+        summary = summarize_action(item)
+        self.set_text(self.queue_detail, summary)
+        password = self.reauth()
+        if password is None:
+            return
+        if decision == "approve":
+            confirmed = messagebox.askyesno(
+                "Approve owner action?",
+                f"{summary}\n\nApprove this request and apply these changes?",
+                parent=self.app.root,
+            )
+        else:
+            confirmed = messagebox.askyesno(
+                "Reject owner action?",
+                f"{summary}\n\nReject this request? The requested changes will not be applied.",
+                parent=self.app.root,
+            )
+        if not confirmed:
+            return
+
+        def work():
+            api = self.app.require_remote()
+            api.request("POST", "/api/reauth", {"password": password})
+            return api.request("POST", f"/api/owner-actions/{item['id']}/{decision}", None)
+
+        def done(data):
+            messagebox.showinfo("Owner action", f"Request is now {data.get('action', {}).get('status', 'decided')}.")
+            self.load_queue()
+
+        self.app.run_async(work, done, self.app.show_error)
+
     def refresh(self):
-        pass
+        self.load_queue()

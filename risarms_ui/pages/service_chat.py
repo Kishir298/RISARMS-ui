@@ -74,9 +74,8 @@ class ServiceChatPage(Page):
         if not prompt or len(prompt) > 32000:
             messagebox.showerror("Message", "Enter 1–32000 characters.")
             return
-        profile = self.app.connection.profile or {}
-        if self.service in ("ascs", "tiviss") and profile.get("role") != "owner":
-            messagebox.showerror("Permission", f"{self.title} requires the CORE owner account.")
+        if self.service in ("ascs", "tiviss") and not self.app.service_allowed(self.service):
+            messagebox.showerror("Permission", f"{self.title} is not enabled for this account.")
             return
         if self.coding and not messagebox.askyesno("Allow coding task", "ASCS can generate and modify files. Continue?"):
             return

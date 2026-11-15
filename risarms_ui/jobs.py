@@ -64,8 +64,11 @@ class JobSession:
         self._start(work)
 
     def start_local_service(self, service: str, root: str, home: str, prompt: str, model: str, mode: str):
+        self.job_id = uuid.uuid4().hex
+        extra_env = self.app.approval_env(self.job_id) if hasattr(self.app, "approval_env") else None
+
         def work():
-            return self.runner.service(service, root, home, prompt, model, self.on_output, mode)
+            return self.runner.service(service, root, home, prompt, model, self.on_output, mode, extra_env)
 
         self._start(work)
 
