@@ -87,8 +87,8 @@ class TasksPage(Page):
         if service == "ascs" and source in ("Server", "Local service"):
             if not messagebox.askyesno("Allow coding task", "ASCS can generate and modify files. Continue?"):
                 return
-        if service in ("ascs", "tiviss") and not self.app.is_owner():
-            messagebox.showerror("Permission", "ASCS and TIVISS require the CORE owner account.")
+        if service in ("ascs", "tiviss") and not self.app.service_allowed(service):
+            messagebox.showerror("Permission", f"{service.upper()} is not enabled for this account.")
             return
         self.output_text = ""
         self.output.configure(state="normal")
