@@ -21,7 +21,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from . import APP_NAME, __version__
-from .approvals import ApprovalBroker
+from .approvals import ApprovalBroker, approval_signature
 from .approvals_dialog import ask as ask_approval
 from .authorization import service_allowed
 from .connection.api import APIError, validate_origin
@@ -651,12 +651,7 @@ class App:
         return self.approvals.env(job_id)
 
     def _request_approval(self, payload):
-        signature = (
-            str(payload.get("service", "")),
-            str(payload.get("action", "")),
-            str(payload.get("command", "")),
-            str(payload.get("workspace", "")),
-        )
+        signature = approval_signature(payload)
         if signature in self.approval_session:
             return {"decision": "allow_session", "reason": "approved earlier in this session"}
         future = concurrent.futures.Future()
@@ -716,12 +711,7 @@ class App:
                         _LOG.exception("Approval dialog failed")
                         decision = "deny"
                     if decision == "allow_session":
-                        self.approval_session.add((
-                            str(payload_data.get("service", "")),
-                            str(payload_data.get("action", "")),
-                            str(payload_data.get("command", "")),
-                            str(payload_data.get("workspace", "")),
-                        ))
+                        self.approval_session.add(approval_signature(payload_data))
                     future.set_result({"decision": decision, "reason": "desktop decision"})
                 elif kind == "call":
                     payload()

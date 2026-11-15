@@ -7,7 +7,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from risarms_ui.approvals import ApprovalBroker
+from risarms_ui.approvals import ApprovalBroker, approval_signature
 
 
 def post(url, token, payload):
@@ -54,3 +54,18 @@ def test_broker_denies_when_ui_fails():
         assert body["decision"] == "deny"
     finally:
         broker.close()
+
+
+def test_session_signature_scopes_tool_arguments_and_ignores_job():
+    first = {
+        "service": "asis", "action": "HIGH", "command": "write_file /a",
+        "workspace": "/workspace", "details": {"job": "one", "arguments": {"path": "/a"}},
+    }
+    same_scope = {
+        **first, "details": {"job": "two", "arguments": {"path": "/a"}},
+    }
+    other_path = {
+        **first, "details": {"job": "one", "arguments": {"path": "/b"}},
+    }
+    assert approval_signature(first) == approval_signature(same_scope)
+    assert approval_signature(first) != approval_signature(other_path)

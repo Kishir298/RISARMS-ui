@@ -5,11 +5,33 @@ import hmac
 import json
 import secrets
 import threading
+from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 MAX_BODY = 64 * 1024
 DECISIONS = {"allow_once", "allow_session", "deny"}
+
+
+def approval_signature(payload):
+    """Return the canonical session-approval key for one broker request."""
+    if not isinstance(payload, Mapping):
+        payload = {}
+    details = payload.get("details")
+    scope = {}
+    if isinstance(details, Mapping):
+        scope = {str(key): value for key, value in details.items() if key != "job"}
+    try:
+        rendered = json.dumps(scope, sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        rendered = repr(scope)
+    return (
+        str(payload.get("service", "")),
+        str(payload.get("action", "")),
+        str(payload.get("command", "")),
+        str(payload.get("workspace", "")),
+        rendered,
+    )
 
 
 class ApprovalBroker:
