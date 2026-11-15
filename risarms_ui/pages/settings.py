@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -63,8 +64,9 @@ class SettingsPage(Page):
         update_frame.pack(fill="x", pady=(0, 10))
         self.update_url = field(update_frame, "Signed update manifest URL",
                                 self.app.preferences.get("update_url", "https://github.com/Kishir298/RISARMS-ui/releases/latest/download/update.json"))
-        self.update_key = field(update_frame, "Ed25519 public key (base64)",
+        self.update_key = field(update_frame, "Ed25519 public key (development override; packaged key wins)",
                                 self.app.preferences.get("update_key", ""))
+        self.pending_update = None
         row_update = tk.Frame(update_frame, background=self.colors["bg"])
         row_update.pack(fill="x", padx=10, pady=8)
         ttk.Label(row_update, text="Channel").pack(side="left", padx=(0, 8))
@@ -72,8 +74,11 @@ class SettingsPage(Page):
         self.update_channel.set(self.app.preferences.get("update_channel", "stable"))
         self.update_channel.pack(side="left")
         ttk.Button(row_update, text="Check for updates", command=self.check_updates).pack(side="left", padx=8)
-        ttk.Label(update_frame, text="Updates are checked and verified only; installation is never automatic.",
-                  style="Muted.TLabel").pack(anchor="w", padx=10, pady=(0, 8))
+        self.download_button = ttk.Button(
+            row_update, text="Download verified update", command=self.download_update, state="disabled")
+        self.download_button.pack(side="left")
+        ttk.Label(update_frame, text="Updates are downloaded only from signed manifests and verified by SHA-256. Installation opens the OS installer after confirmation; it is never silent.",
+                  style="Muted.TLabel", wraplength=820).pack(anchor="w", padx=10, pady=(0, 8))
 
         security = ttk.LabelFrame(self.body, text="Security")
         security.pack(fill="x", pady=(0, 10))
@@ -91,7 +96,7 @@ class SettingsPage(Page):
 
     def check_updates(self):
         url = self.update_url.get().strip()
-        key = self.update_key.get().strip()
+        key = updates.resolve_public_key(self.update_key.get().strip())
         channel = self.update_channel.get()
         if not key:
             messagebox.showerror("Updates", "Configure the Ed25519 public key first.")
@@ -103,11 +108,44 @@ class SettingsPage(Page):
 
         def done(result):
             found, available = result
+            self.pending_update = found if available else None
+            self.download_button.configure(state="normal" if available else "disabled")
             messagebox.showinfo(
                 "Updates",
                 f"Latest {found.channel} version: {found.version}\n"
-                + ("An update is available." if available else "This installation is current."),
+                + ("An update is available. Download it when you are ready." if available else "This installation is current."),
             )
+
+        def failed(exc):
+            self.pending_update = None
+            self.download_button.configure(state="disabled")
+            self.app.show_error(exc)
+
+        self.app.run_async(work, done, failed)
+
+    def download_update(self):
+        found = self.pending_update
+        if found is None:
+            messagebox.showerror("Updates", "Check for an available update first.")
+            return
+
+        def work():
+            return updates.download_update(
+                found, self.app.data_directory / "updates", machine=platform.machine())
+
+        def done(path):
+            if messagebox.askyesno(
+                "Update downloaded",
+                f"Verified {path.name}.\n\nOpen the OS installer now? Installation is not silent and may require administrator approval.",
+            ):
+                try:
+                    updates.launch_installer(path)
+                except updates.UpdateError as exc:
+                    self.app.show_error(exc)
+                    return
+                self.app.set_status("Verified update installer opened")
+            else:
+                self.app.set_status(f"Verified update saved to {path}")
 
         self.app.run_async(work, done, self.app.show_error)
 

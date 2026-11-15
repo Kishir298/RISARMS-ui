@@ -823,6 +823,9 @@ class App:
         return self.connection.api
 
     # ------------------------------------------------------------------ helpers
+    def set_status(self, text: str):
+        self._set_status(text)
+
     def _set_status(self, text: str):
         try:
             self.status_var.set(text)

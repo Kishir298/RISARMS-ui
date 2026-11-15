@@ -5,6 +5,8 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +19,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 MAX_MANIFEST = 1024 * 1024
 MAX_ARTIFACT = 4 * 1024 * 1024 * 1024
+INSTALLER_SUFFIXES = {
+    "darwin": (".dmg", ".pkg", ".zip"),
+    "win32": (".exe", ".msi", ".zip"),
+    "linux": (".deb", ".appimage", ".tar.gz", ".zip"),
+}
 
 
 class UpdateError(RuntimeError):
@@ -120,8 +127,18 @@ def update_available(current, update):
     return _version(update.version) > _version(current) and _version(current) >= _version(update.min_version)
 
 
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def download_artifact(artifact, destination):
+    _safe_url(artifact.url)
     destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     request = Request(artifact.url, headers={"User-Agent": "RISARMS-UI updater"})
     digest = hashlib.sha256()
     total = 0
@@ -146,3 +163,110 @@ def download_artifact(artifact, destination):
         raise UpdateError("Update artifact hash or size did not match the signed manifest.")
     os.replace(temp, destination)
     return destination
+
+
+def bundled_public_key():
+    """Return the public key shipped next to this module, if any."""
+    path = Path(__file__).with_name("update_public_key.txt")
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def resolve_public_key(override=""):
+    """Prefer the packaged/environment key over a local settings override."""
+    return (
+        os.environ.get("RISARMS_UPDATE_PUBLIC_KEY", "").strip()
+        or bundled_public_key()
+        or str(override or "").strip()
+    )
+
+
+def select_artifact(update, platform_name=None, machine=None):
+    """Choose a native installer for this platform, never a traversal name."""
+    platform_name = platform_name or ("darwin" if sys.platform == "darwin" else "win32" if sys.platform == "win32" else "linux")
+    suffixes = INSTALLER_SUFFIXES.get(platform_name)
+    if not suffixes:
+        raise UpdateError("This platform has no supported update installer.")
+    candidates = []
+    for artifact in update.artifacts:
+        name = artifact.name
+        if not name or name in (".", "..") or "/" in name or "\\" in name or Path(name).name != name:
+            raise UpdateError("Update artifact name is unsafe.")
+        lowered = name.lower()
+        for index, suffix in enumerate(suffixes):
+            if lowered.endswith(suffix):
+                candidates.append((index, artifact))
+                break
+    if not candidates:
+        raise UpdateError("This release has no installer for this platform.")
+    candidates.sort(key=lambda item: item[0])
+    if machine:
+        aliases = {
+            "amd64": ("amd64", "x86_64", "x64"),
+            "x86_64": ("amd64", "x86_64", "x64"),
+            "arm64": ("arm64", "aarch64"),
+            "aarch64": ("arm64", "aarch64"),
+        }.get(str(machine).lower(), (str(machine).lower(),))
+        preferred = [
+            item for item in candidates
+            if any(alias in item[1].name.lower() for alias in aliases)
+        ]
+        if preferred:
+            return preferred[0][1]
+    return candidates[0][1]
+
+
+def download_update(update, directory, platform_name=None, machine=None):
+    """Download one signed installer into a private staging directory."""
+    artifact = select_artifact(update, platform_name, machine)
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.chmod(0o700)
+    except OSError:
+        pass
+    destination = directory / artifact.name
+    if destination.is_symlink():
+        destination.unlink()
+    if destination.exists():
+        if destination.stat().st_size == artifact.size and _file_sha256(destination) == artifact.sha256:
+            return destination
+        destination.unlink()
+    return download_artifact(artifact, destination)
+
+
+def installer_command(path, platform_name=None):
+    """Return the OS command used to hand a verified artifact to the user."""
+    path = Path(path).resolve()
+    if not path.is_file():
+        raise UpdateError("The verified update artifact is missing.")
+    platform_name = platform_name or ("darwin" if sys.platform == "darwin" else "win32" if sys.platform == "win32" else "linux")
+    if platform_name == "darwin":
+        return ["open", str(path)]
+    if platform_name == "win32":
+        return [str(path)]
+    if path.suffix.lower() == ".appimage":
+        try:
+            path.chmod(0o700)
+        except OSError as exc:
+            raise UpdateError("The AppImage could not be made executable.") from exc
+        return [str(path)]
+    return ["xdg-open", str(path)]
+
+
+def launch_installer(path, platform_name=None):
+    """Open the verified installer; the user still completes installation."""
+    command = installer_command(path, platform_name)
+    if (platform_name or sys.platform) == "win32":
+        try:
+            os.startfile(command[0])
+        except OSError as exc:
+            raise UpdateError("The update installer could not be opened.") from exc
+        return command[0]
+    try:
+        subprocess.Popen(command)
+    except OSError as exc:
+        raise UpdateError("The update installer could not be opened.") from exc
+    return command[0]

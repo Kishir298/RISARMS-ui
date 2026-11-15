@@ -119,3 +119,71 @@ def test_artifact_download_rejects_hash_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(updates, "urlopen", lambda *_args, **_kwargs: Response())
     with pytest.raises(updates.UpdateError, match="hash"):
         updates.download_artifact(artifact, tmp_path / "download.zip")
+
+
+def update_with(*names):
+    return updates.Update(
+        "RISARMS-UI", "0.7.0", "stable", "0.6.0",
+        tuple(updates.Artifact(name, "https://example.com/" + name, "a" * 64, 1) for name in names),
+    )
+
+
+def test_installer_selection_is_platform_and_architecture_aware():
+    release = update_with(
+        "RISARMS-Portal-linux-amd64.deb", "RISARMS-Portal-linux-arm64.deb",
+        "RISARMS-Portal-macos-arm64.dmg", "RISARMS-Portal-windows-x64-setup.exe",
+    )
+    assert updates.select_artifact(release, "darwin", "arm64").name.endswith(".dmg")
+    assert updates.select_artifact(release, "win32", "amd64").name.endswith(".exe")
+    assert updates.select_artifact(release, "linux", "aarch64").name.endswith("arm64.deb")
+    assert updates.select_artifact(release, "linux", "x86_64").name.endswith("amd64.deb")
+    with pytest.raises(updates.UpdateError, match="unsafe"):
+        updates.select_artifact(update_with("../evil.dmg"), "darwin")
+
+
+def test_installer_command_does_not_use_a_shell(tmp_path):
+    package = tmp_path / "RISARMS-Portal.deb"
+    package.write_bytes(b"package")
+    assert updates.installer_command(package, "linux") == ["xdg-open", str(package.resolve())]
+    assert updates.installer_command(package, "darwin") == ["open", str(package.resolve())]
+    appimage = tmp_path / "RISARMS-Portal.AppImage"
+    appimage.write_bytes(b"binary")
+    assert updates.installer_command(appimage, "linux") == [str(appimage.resolve())]
+    assert appimage.stat().st_mode & 0o100
+
+
+def test_public_key_prefers_environment_and_bundle_over_override(monkeypatch):
+    monkeypatch.delenv("RISARMS_UPDATE_PUBLIC_KEY", raising=False)
+    monkeypatch.setattr(updates, "bundled_public_key", lambda: "bundled-key")
+    assert updates.resolve_public_key("local-key") == "bundled-key"
+    monkeypatch.setenv("RISARMS_UPDATE_PUBLIC_KEY", "environment-key")
+    assert updates.resolve_public_key("local-key") == "environment-key"
+    monkeypatch.delenv("RISARMS_UPDATE_PUBLIC_KEY")
+    monkeypatch.setattr(updates, "bundled_public_key", lambda: "")
+    assert updates.resolve_public_key("local-key") == "local-key"
+
+
+def test_download_update_selects_installer_and_uses_private_directory(tmp_path, monkeypatch):
+    body = b"deb payload"
+    artifact = updates.Artifact(
+        "risarms-portal_0.7.0_amd64.deb", "https://example.com/risarms.deb",
+        hashlib.sha256(body).hexdigest(), len(body),
+    )
+    release = updates.Update("RISARMS-UI", "0.7.0", "stable", "0.6.0", (artifact,))
+
+    class Response:
+        def __enter__(self):
+            self.stream = __import__("io").BytesIO(body)
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, size):
+            return self.stream.read(size)
+
+    monkeypatch.setattr(updates, "urlopen", lambda *_args, **_kwargs: Response())
+    path = updates.download_update(release, tmp_path / "updates", "linux", "x86_64")
+    assert path.name == artifact.name
+    assert path.read_bytes() == body
+    assert (tmp_path / "updates").stat().st_mode & 0o700 == 0o700
