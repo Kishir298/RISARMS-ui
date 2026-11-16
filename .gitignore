@@ -111,3 +111,6 @@ secrets/
 *.priv
 private-key*
 release-keys/
+
+# Generated from UPDATE_PUBLIC_KEY by packaging/build.py
+risarms_ui/update_public_key.txt

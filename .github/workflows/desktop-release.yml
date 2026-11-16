@@ -70,6 +70,11 @@ jobs:
           python -m ruff check --select E9,F,I risarms_ui tests
           python -m pytest -q
 
+      - name: Embed production update public key
+        env:
+          UPDATE_PUBLIC_KEY: ${{ vars.UPDATE_PUBLIC_KEY || secrets.UPDATE_PUBLIC_KEY }}
+        run: python packaging/embed_update_key.py
+
       # A build agent has no display, so `--doctor` (which probes for one) is
       # not the right gate here. Packaging only needs Tk to be importable.
       - name: Verify Tk for the build interpreter

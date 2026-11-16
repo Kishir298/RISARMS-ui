@@ -174,11 +174,26 @@ def bundled_public_key():
         return ""
 
 
+def validate_public_key(value):
+    """Return canonical base64 for a 32-byte Ed25519 public key."""
+    text = str(value or "").strip()
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise UpdateError("The Ed25519 public key is not valid base64.") from exc
+    if len(raw) != 32:
+        raise UpdateError("The Ed25519 public key must contain 32 bytes.")
+    return base64.b64encode(raw).decode("ascii")
+
+
 def resolve_public_key(override=""):
-    """Prefer the packaged/environment key over a local settings override."""
+    """Prefer the packaged key, then an environment key, then a dev override."""
+    bundled = bundled_public_key()
+    if bundled and getattr(sys, "frozen", False):
+        return bundled
     return (
         os.environ.get("RISARMS_UPDATE_PUBLIC_KEY", "").strip()
-        or bundled_public_key()
+        or bundled
         or str(override or "").strip()
     )
 

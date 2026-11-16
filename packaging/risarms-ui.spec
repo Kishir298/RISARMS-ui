@@ -15,12 +15,13 @@ HIDDEN = [
     "keyring.backends.kwallet",
 ]
 HIDDEN += collect_submodules("keyring.backends")
+KEY = ROOT.parent / "risarms_ui" / "update_public_key.txt"
 
 a = Analysis(
     [str(ROOT / "launcher.py")],
     pathex=[str(ROOT.parent)],
     binaries=[],
-    datas=[],
+    datas=[(str(KEY), "risarms_ui")] if KEY.is_file() else [],
     hiddenimports=HIDDEN,
     hookspath=[],
     hooksconfig={},

@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import embed_update_key  # noqa: E402  (local packaging helper)
 import installers  # noqa: E402  (local packaging helper)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,6 +109,7 @@ def native_installers(app_dir: Path, app_bundle: Path | None, machine: str) -> l
 
 
 def main() -> int:
+    embed_update_key.embed()
     try:
         import PyInstaller  # noqa: F401
     except ImportError:

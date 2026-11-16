@@ -187,3 +187,19 @@ def test_download_update_selects_installer_and_uses_private_directory(tmp_path, 
     assert path.name == artifact.name
     assert path.read_bytes() == body
     assert (tmp_path / "updates").stat().st_mode & 0o700 == 0o700
+
+
+def test_public_key_validation_rejects_bad_material():
+    private, public = keypair()
+    assert updates.validate_public_key(public) == public
+    with pytest.raises(updates.UpdateError, match="base64"):
+        updates.validate_public_key("not-base64")
+    with pytest.raises(updates.UpdateError, match="32 bytes"):
+        updates.validate_public_key(base64.b64encode(b"short").decode("ascii"))
+
+
+def test_frozen_bundle_key_cannot_be_overridden_by_environment(monkeypatch):
+    monkeypatch.setattr(updates, "bundled_public_key", lambda: "bundled-key")
+    monkeypatch.setattr(updates.sys, "frozen", True, raising=False)
+    monkeypatch.setenv("RISARMS_UPDATE_PUBLIC_KEY", "environment-key")
+    assert updates.resolve_public_key("local-key") == "bundled-key"
