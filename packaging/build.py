@@ -18,14 +18,18 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(ROOT))
 
 import embed_update_key  # noqa: E402  (local packaging helper)
 import installers  # noqa: E402  (local packaging helper)
 
-ROOT = Path(__file__).resolve().parents[1]
+from risarms_ui import __version__  # noqa: E402
+from risarms_ui.release import debian_arch, normalize_arch, platform_tag  # noqa: E402
+
 DIST = ROOT / "dist"
-VERSION = "0.6.0"
+VERSION = __version__
 
 
 def run(*command, **kwargs):
@@ -65,9 +69,9 @@ def sign_windows(target: Path):
     run(*command)
 
 
-def archive(path: Path, platform_tag: str) -> Path:
+def archive(path: Path, tag: str) -> Path:
     suffix = "zip" if sys.platform in ("darwin", "win32") else "tar.gz"
-    destination = DIST / f"RISARMS-Portal-{VERSION}-{platform_tag}.{suffix}"
+    destination = DIST / f"RISARMS-Portal-{VERSION}-{tag}.{suffix}"
     if destination.exists():
         destination.unlink()
     if suffix == "zip":
@@ -96,11 +100,11 @@ def native_installers(app_dir: Path, app_bundle: Path | None, machine: str) -> l
         built.append(installers.build_windows_msi(
             app_dir, VERSION, DIST / f"RISARMS-Portal-{VERSION}-windows-{machine}.msi"))
     else:
-        arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(machine, machine)
+        arch = debian_arch(machine)
         built.append(installers.build_deb(
             app_dir, VERSION, arch, DIST / f"risarms-portal_{VERSION}_{arch}.deb"))
         built.append(installers.build_appimage(
-            app_dir, VERSION, arch, DIST / f"RISARMS-Portal-{VERSION}-linux-{machine}.AppImage"))
+            app_dir, VERSION, machine, DIST / f"RISARMS-Portal-{VERSION}-linux-{machine}.AppImage"))
     produced = [item for item in built if item is not None]
     skipped = len(built) - len(produced)
     if skipped:
@@ -127,29 +131,30 @@ def main() -> int:
         )
         return 2
     run(sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(ROOT / "packaging" / "risarms-ui.spec"))
-    machine = platform.machine().lower() or "unknown"
+    machine = normalize_arch(platform.machine())
+    tag = platform_tag(sys.platform, machine)
     if sys.platform == "darwin":
         app = DIST / "RISARMS Portal.app"
         if not app.exists():
             raise SystemExit("Expected macOS application bundle was not produced.")
         sign_macos(app)
-        destination = archive(app, f"macos-{machine}")
+        destination = archive(app, tag)
         notarize_macos(app, destination)
     elif sys.platform == "win32":
         target = DIST / "RISARMS-Portal"
         if not target.exists():
             raise SystemExit("Expected Windows application directory was not produced.")
         sign_windows(target / "risarms-ui.exe")
-        destination = archive(target, f"windows-{machine}")
+        destination = archive(target, tag)
     else:
         target = DIST / "RISARMS-Portal"
         if not target.exists():
             raise SystemExit("Expected Linux application directory was not produced.")
-        destination = archive(target, f"linux-{machine}")
+        destination = archive(target, tag)
     app_bundle = DIST / "RISARMS Portal.app" if sys.platform == "darwin" else None
     app_dir = DIST / "RISARMS-Portal"
     artifacts = [destination] + native_installers(app_dir, app_bundle, machine)
-    sums = DIST / "SHA256SUMS"
+    sums = DIST / f"SHA256SUMS-{tag}"
     sums.write_text("", encoding="utf-8")
     for artifact in artifacts:
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()

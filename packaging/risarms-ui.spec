@@ -6,6 +6,9 @@ import sys
 from PyInstaller.utils.hooks import collect_submodules
 
 ROOT = Path(SPECPATH).resolve().parent
+sys.path.insert(0, str(ROOT.parent))
+from risarms_ui import __version__  # noqa: E402
+
 HIDDEN = [
     "websockets.sync.client",
     "keyring.backends",
@@ -63,8 +66,8 @@ if sys.platform == "darwin":
         bundle_identifier="org.risarms.portal",
         info_plist={
             "CFBundleDisplayName": "RISARMS Portal",
-            "CFBundleShortVersionString": "0.6.0",
-            "CFBundleVersion": "0.6.0",
+            "CFBundleShortVersionString": __version__,
+            "CFBundleVersion": __version__,
             "LSMinimumSystemVersion": "11.0",
             "NSHighResolutionCapable": True,
             "NSRequiresAquaSystemAppearance": False,

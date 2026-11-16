@@ -51,6 +51,22 @@ def test_valid_manifest_and_update_detection():
     assert updates.update_available("0.5.0", update) is False
 
 
+def test_beta_manifest_versions_are_ordered_and_updates_detected():
+    private, public = keypair()
+    update = updates.verify_manifest(
+        signed(
+            manifest(version="0.6.0-beta.2", channel="beta", min_version="0.6.0-beta.0"),
+            private,
+        ),
+        public,
+        channel="beta",
+    )
+    assert update.version == "0.6.0-beta.2"
+    assert updates.update_available("0.6.0-beta.1", update) is True
+    assert updates.update_available("0.6.0-beta.2", update) is False
+    assert updates.update_available("0.6.0", update) is False
+
+
 def test_tampering_wrong_product_and_channel_are_rejected():
     private, public = keypair()
     payload = signed(manifest(), private)

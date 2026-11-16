@@ -6,28 +6,22 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS Intel
-            os: macos-13
-            artifact: macos-x86_64
-          - name: macOS Apple Silicon
-            os: macos-14
-            artifact: macos-arm64
-          - name: Windows
-            os: windows-latest
-            artifact: windows-x86_64
-          - name: Linux
-            os: ubuntu-22.04
-            artifact: linux-x86_64
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      base_version: ${{ steps.metadata.outputs.base_version }}
+      min_version: ${{ steps.metadata.outputs.min_version }}
+      channel: ${{ steps.metadata.outputs.channel }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+      release: ${{ steps.metadata.outputs.release }}
+      tag: ${{ steps.metadata.outputs.tag }}
     steps:
       - name: Check out the desktop application
         uses: actions/checkout@v4
@@ -37,14 +31,58 @@ jobs:
         with:
           python-version: "3.12"
 
-      # `python3-tk` provides Tk for the distribution interpreter only, so the
-      # Linux build runs from a virtualenv created with /usr/bin/python3
-      # instead of the setup-python toolchain cache.
+      - name: Derive and validate release metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            python packaging/validate_release.py \
+              --ref "${GITHUB_REF_NAME}" \
+              --check \
+              --github-output "${GITHUB_OUTPUT}"
+          else
+            python packaging/validate_release.py \
+              --check \
+              --github-output "${GITHUB_OUTPUT}"
+          fi
+
+  build:
+    name: ${{ matrix.name }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Intel
+            os: macos-15-intel
+            platform: macos-x86_64
+          - name: macOS Apple Silicon
+            os: macos-15
+            platform: macos-arm64
+          - name: Windows
+            os: windows-2022
+            platform: windows-x86_64
+          - name: Linux
+            os: ubuntu-24.04
+            platform: linux-x86_64
+    steps:
+      - name: Check out the desktop application
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Prepare a Tk-enabled interpreter and packaging tools (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-tk tk dpkg-dev fakeroot
+          sudo apt-get install -y python3-tk python3-venv tk dpkg-dev fakeroot
           /usr/bin/python3 -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
@@ -67,44 +105,38 @@ jobs:
 
       - name: Run tests and lint
         run: |
-          python -m ruff check --select E9,F,I risarms_ui tests
-          python -m pytest -q
+          python -m ruff check --select E9,F,I risarms_ui tests packaging
+          python -m pytest -q --tb=short
 
       - name: Embed production update public key
         env:
           UPDATE_PUBLIC_KEY: ${{ vars.UPDATE_PUBLIC_KEY || secrets.UPDATE_PUBLIC_KEY }}
         run: python packaging/embed_update_key.py
 
-      # A build agent has no display, so `--doctor` (which probes for one) is
-      # not the right gate here. Packaging only needs Tk to be importable.
       - name: Verify Tk for the build interpreter
         run: python -c "import tkinter; print('Tk', tkinter.TkVersion)"
 
       - name: Build artifacts and native installers
         run: |
           python packaging/build.py
-          python packaging/sbom.py --output dist/sbom.cdx.json
+          python packaging/sbom.py --output "dist/sbom-${{ matrix.platform }}.cdx.json" --version "${{ needs.validate.outputs.version }}"
 
-      - name: Upload artifacts
+      - name: Upload per-platform artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: risarms-desktop-${{ matrix.artifact }}
+          name: risarms-desktop-${{ matrix.platform }}
           path: |
             dist/RISARMS-Portal-*
-            dist/risarms-portal*
-            dist/*.dmg
-            dist/*.msi
-            dist/*.AppImage
-            dist/*.deb
-            dist/SHA256SUMS
-            dist/sbom.cdx.json
+            dist/risarms-portal_*
+            dist/SHA256SUMS-*
+            dist/sbom-*.cdx.json
           if-no-files-found: error
 
-  publish:
-    name: Publish signed release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-22.04
+  release:
+    name: Create draft unsigned release
+    needs: [validate, build]
+    if: github.event_name == 'push' && github.ref_type == 'tag' && needs.validate.outputs.release == 'true'
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -117,31 +149,137 @@ jobs:
           python-version: "3.12"
 
       - name: Install manifest signer
-        run: python -m pip install --upgrade pip cryptography
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "cryptography>=42.0"
 
-      - name: Download packaged installers
+      - name: Download all per-platform artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
+      - name: Verify per-platform checksums
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -maxdepth 2 -type f -exec cp {} release/ \;
+          cd release
+          shopt -s nullglob
+          sums=(SHA256SUMS-*)
+          if [ ${#sums[@]} -eq 0 ]; then
+            echo "No per-platform checksum files were downloaded." >&2
+            exit 1
+          fi
+          for file in "${sums[@]}"; do
+            sha256sum -c "$file"
+          done
+
+      - name: Merge platform SBOMs
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sboms=(release/sbom-*.cdx.json)
+          if [ ${#sboms[@]} -eq 0 ]; then
+            echo "No per-platform SBOMs were downloaded." >&2
+            exit 1
+          fi
+          python packaging/sbom.py \
+            --merge "${sboms[@]}" \
+            --output release/sbom-aggregate.cdx.json \
+            --version "$VERSION"
+
       - name: Generate signed update manifest
         env:
           UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          CHANNEL: ${{ needs.validate.outputs.channel }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          MIN_VERSION: ${{ needs.validate.outputs.min_version }}
         run: |
-          mkdir -p release
-          find artifacts -type f -maxdepth 2 -exec cp {} release/ \;
+          set -euo pipefail
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "UPDATE_SIGNING_KEY is required; refusing to create an unsigned update manifest." >&2
+            exit 1
+          fi
           python packaging/release_manifest.py \
             --dist release \
-            --version "$(raw="${GITHUB_REF_NAME#v}"; echo "${raw%%-*}")" \
+            --version "$VERSION" \
             --repository "${GITHUB_REPOSITORY}" \
-            --tag "${GITHUB_REF_NAME}" \
-            --channel "$(case "${GITHUB_REF_NAME}" in *-beta*) echo beta;; *) echo stable;; esac)"
+            --tag "$TAG" \
+            --min-version "$MIN_VERSION" \
+            --channel "$CHANNEL"
 
-      - name: Upload GitHub release assets
+      - name: Generate aggregate checksums
+        run: |
+          set -euo pipefail
+          cd release
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          root = Path(".")
+          lines = []
+          for path in sorted(item for item in root.iterdir() if item.is_file() and item.name != "SHA256SUMS"):
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              lines.append(f"{digest}  {path.name}")
+          Path("SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+          sha256sum -c SHA256SUMS
+
+      - name: Prepare unsigned release notes
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          CHANNEL: ${{ needs.validate.outputs.channel }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANNEL" = "beta" ]; then
+            title="RISARMS Portal ${VERSION} [BETA - UNSIGNED]"
+            status="This is a **beta prerelease** of RISARMS Portal ${VERSION}. It is intended for testing only."
+          else
+            title="RISARMS Portal ${VERSION} [UNSIGNED]"
+            status="This is an **unsigned** build of RISARMS Portal ${VERSION}."
+          fi
+          {
+            echo "$status"
+            echo
+            echo "These artifacts were produced without production signing credentials:"
+            echo
+            echo "- macOS builds are **ad-hoc signed only**; they are not Developer ID signed and not notarized."
+            echo "- Windows builds are **unsigned**."
+            echo "- Linux archives and installers are **unsigned**."
+            echo
+            echo "The update manifest (\`update.json\`) is Ed25519-signed, but public distribution and signed auto-updates remain gated. This release is created as a **draft** and is not published automatically."
+            echo
+            echo "## Assets"
+            echo
+            echo "- \`SHA256SUMS\`: aggregate checksums for all assets in this release."
+            echo "- \`SHA256SUMS-<platform>\`: per-platform checksums."
+            echo "- \`sbom-<platform>.cdx.json\` and \`sbom-aggregate.cdx.json\`: CycloneDX SBOMs."
+          } > release-notes.md
+          echo "RELEASE_TITLE=$title" >> "$GITHUB_ENV"
+
+      - name: Create draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          PRERELEASE: ${{ needs.validate.outputs.prerelease }}
         run: |
-          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
-            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
-          gh release upload "${GITHUB_REF_NAME}" release/* --clobber
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to modify published or draft assets." >&2
+            exit 1
+          fi
+          args=(
+            "$TAG"
+            --draft
+            --verify-tag
+            --title "$RELEASE_TITLE"
+            --notes-file release-notes.md
+          )
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}" release/*

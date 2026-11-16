@@ -17,6 +17,8 @@ from urllib.request import Request, urlopen
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from .release import version_key
+
 MAX_MANIFEST = 1024 * 1024
 MAX_ARTIFACT = 4 * 1024 * 1024 * 1024
 INSTALLER_SUFFIXES = {
@@ -63,10 +65,10 @@ def _safe_url(url):
 def _version(value):
     if not isinstance(value, str) or not value.strip():
         raise UpdateError("Update version is missing.")
-    parts = value.strip().lstrip("v").split(".")
-    if not all(part.isdigit() for part in parts[:3]):
-        raise UpdateError("Update version is not numeric.")
-    return tuple(int(part) for part in (parts + ["0", "0", "0"])[:3])
+    try:
+        return version_key(value)
+    except ValueError as exc:
+        raise UpdateError("Update version is not numeric.") from exc
 
 
 def verify_manifest(payload, public_key, product="RISARMS-UI", channel="stable"):

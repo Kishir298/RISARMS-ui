@@ -1,9 +1,14 @@
 # RISARMS Portal — Unified Desktop Application
 
 **Version:** `0.6.0`
-**Status:** Source and automated tests implemented. Physical Windows/Linux runs,
-signed installers and long-duration validation are **not yet performed**.
-**Platforms:** macOS, Windows, Linux (Python `>=3.10`, Tkinter/ttk)
+**Status:** Source and automated tests implemented. Local macOS Intel packaging
+and release metadata checks are available. Physical Apple Silicon, Windows, Linux,
+and Void smoke runs, signed/notarized installers, and long-duration validation are
+**not yet performed**. Beta assets are unsigned Windows and ad-hoc-signed,
+unnotarized macOS.
+**Platforms:** macOS Intel and Apple Silicon, Windows x86_64, Linux x86_64
+(Python `>=3.10`, Tkinter/ttk). iOS TestFlight and Android beta distribution are
+future work only.
 
 RISARMS Portal is the canonical desktop client for the R.I.S.A.R.M.S. ecosystem.
 It connects to CORE-HOST and presents C.O.R.E., ASIS, ASCS, RESCS and TIVISS in
@@ -86,8 +91,9 @@ uses Ollama directly; signed update checking uses `cryptography`.
 .venv/bin/ruff check risarms_ui tests packaging
 ```
 
-Current result: **205 tests passed** (macOS Python 3.14). Tests do not require a
-display; GUI smoke tests require Tk.
+Current result: **286 tests passed** (macOS Python 3.14). Tests do not require a
+display; GUI smoke tests require Tk. The verified CORE-HOST baseline is 911
+passed / 4 skipped and CORE-CLIENT is 225 passed / 1 skipped.
 
 ## Build desktop artifacts
 
@@ -98,12 +104,14 @@ python packaging/build.py
 
 Artifacts are written to `dist/`:
 
-- macOS: `RISARMS-Portal-0.6.0-macos-<arch>.zip` (contains `RISARMS Portal.app`)
-- Windows: `RISARMS-Portal-0.6.0-windows-<arch>.zip`
-- Linux: `RISARMS-Portal-0.6.0-linux-<arch>.tar.gz`
-- `SHA256SUMS`
+- macOS: `RISARMS-Portal-0.6.0-macos-x86_64.zip` / `macos-arm64.zip`
+- Windows: `RISARMS-Portal-0.6.0-windows-x86_64.zip` plus `.exe`/`.msi` installers
+- Linux: `RISARMS-Portal-0.6.0-linux-x86_64.tar.gz` plus `.deb`/`.AppImage`
+- `SHA256SUMS-<platform>` and `sbom-<platform>.cdx.json`
 
-Builds are unsigned by default. Optional hooks:
+Builds are unsigned by default. macOS is ad-hoc signed by `packaging/build.py`
+when no Developer ID is configured; it is not notarized. Windows builds are
+unsigned. Optional hooks:
 
 | Variable | Purpose |
 |---|---|
@@ -113,6 +121,19 @@ Builds are unsigned by default. Optional hooks:
 | `RISARMS_TIMESTAMP_URL` | Windows RFC3161 timestamp server |
 
 Never commit certificates, private keys, notarization profiles or passwords.
+
+## Release workflow
+
+`.github/workflows/desktop-release.yml` runs tests and packaging on macOS Intel,
+macOS Apple Silicon, Windows x86_64, and Linux x86_64. Tagged releases use
+`v0.6.0` or `v0.6.0-beta.N`, validate the tag against `pyproject.toml` and
+`risarms_ui.__version__`, and create a **draft** GitHub release. The workflow
+never publishes automatically and never overwrites an existing release.
+
+Draft beta assets are labeled unsigned and unnotarized. The aggregate
+`SHA256SUMS`, per-platform checksums, SBOMs, and Ed25519-signed `update.json` are
+draft assets for testing. Public distribution and signed auto-updates remain
+gated on a production update key and Apple/Windows signing credentials.
 
 ## Security notes
 
@@ -156,13 +177,18 @@ risarms_ui/
 
 | Item | Status |
 |---|---|
-| UI/HTTP/connection tests | IMPLEMENTED (254 passed) |
-| CORE-HOST desktop control contracts | IMPLEMENTED (892 passed / 4 skipped) |
-| Tk GUI launch in this workspace | PENDING (Tk installation incomplete) |
+| UI/HTTP/connection tests | IMPLEMENTED (286 passed) |
+| CORE-HOST desktop control contracts | IMPLEMENTED (911 passed / 4 skipped) |
+| CORE-CLIENT tests | IMPLEMENTED (225 passed / 1 skipped) |
+| Tk GUI launch in this workspace | PENDING (Tk not installed) |
+| Physical Apple Silicon run | NOT YET PERFORMED |
 | Physical Windows run | NOT YET PERFORMED |
 | Physical Linux run | NOT YET PERFORMED |
+| Void Linux glibc smoke test | NOT YET PERFORMED |
 | Signed/notarized installers | NOT YET PERFORMED (hooks implemented) |
+| Public signed auto-updates | GATED (no production key) |
 | LAN reconnect/revocation and 24/7 use | NOT YET PERFORMED |
+| iOS TestFlight / Android beta | FUTURE WORK |
 
 The `tests/` directory also retains protocol-compatibility tests migrated from
 CORE-CLIENT; the native TCP/TLS client itself remains in `CORE/CORE-CLIENT`.
