@@ -25,7 +25,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["pytest", "tkinter.test", "test"],
+    excludes=["client", "pytest", "tkinter.test", "test"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
