@@ -84,6 +84,7 @@ tls/
 
 # PyInstaller and native installer output (built by CI, never committed)
 *.spec
+!packaging/risarms-ui.spec
 *.dmg
 *.msi
 *.AppImage
