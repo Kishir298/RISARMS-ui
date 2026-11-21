@@ -6,7 +6,7 @@ CSRF headers, server-generated ids, idempotent retries, account isolation and
 the single-use WebSocket ticket that carries ``message.received``.
 
 It is skipped unless a CORE-HOST checkout is present (``RISARMS_CORE_HOST`` or
-the sibling ``CORE/CORE-HOST`` directory), because it needs to start a server.
+the sibling ``CORE-HOST`` directory), because it needs to start a server.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ websockets = pytest.importorskip("websockets")
 
 PASSWORD = "e2e-password-long-enough"
 WORKSPACE = Path(__file__).resolve().parents[3]
-CORE_HOST = Path(os.environ.get("RISARMS_CORE_HOST", WORKSPACE / "CORE" / "CORE-HOST"))
+CORE_HOST = Path(os.environ.get("RISARMS_CORE_HOST", WORKSPACE / "CORE-HOST"))
 
 pytestmark = pytest.mark.skipif(
     not (CORE_HOST / "core" / "web" / "gateway.py").is_file(),

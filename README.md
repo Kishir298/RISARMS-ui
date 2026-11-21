@@ -191,4 +191,6 @@ risarms_ui/
 | iOS TestFlight / Android beta | FUTURE WORK |
 
 The `tests/` directory also retains protocol-compatibility tests migrated from
-CORE-CLIENT; the native TCP/TLS client itself remains in `CORE/CORE-CLIENT`.
+CORE-CLIENT; the native TCP/TLS client itself lives in the separate
+`Kishir298/CORE-CLIENT` repository, which this application embeds as a
+sibling checkout — it is not part of RISARMS-ui.
