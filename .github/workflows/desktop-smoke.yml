@@ -56,8 +56,26 @@ jobs:
       - name: Check the installed binary reports its version
         run: risarms-ui --version
 
-      - name: Check the installed binary passes its dependency doctor
-        run: risarms-ui --doctor
+      - name: Check the installed binary sees Tk, a display and its dependencies
+        run: |
+          set -euo pipefail
+          # A headless runner has no SecretService, so --doctor correctly reports
+          # "not ready: keyring". Assert the packaging facts instead of the
+          # desktop-environment ones.
+          xvfb-run -a risarms-ui --doctor >/tmp/doctor.json || true
+          cat /tmp/doctor.json
+          python - <<'PY'
+          import json
+
+          with open("/tmp/doctor.json", encoding="utf-8") as handle:
+              report = json.load(handle)
+          assert report["tkinter"].startswith("Tk"), report["tkinter"]
+          assert report["display"] == "available", report["display"]
+          for name in ("websockets", "cryptography"):
+              assert "missing" not in report[name], (name, report[name])
+          print("Tk, display and runtime dependencies present")
+          print("doctor result on this runner:", report["result"])
+          PY
 
       - name: Launch the GUI under a headless X server
         run: |
