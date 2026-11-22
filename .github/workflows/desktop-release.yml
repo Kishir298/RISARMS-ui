@@ -80,7 +80,13 @@ jobs:
       - name: Check out the desktop application
         uses: actions/checkout@v4
 
+      # Linux builds a venv from the distribution Python because Tk support for
+      # the packaged interpreter comes from python3-tk. setup-python must not run
+      # there: it exports LD_LIBRARY_PATH to its own libpython, so PyInstaller
+      # would collect stdlib extensions from one Python 3.12 and libpython from
+      # another, and the frozen binary would die with "No module named _struct".
       - name: Set up Python
+        if: runner.os != 'Linux'
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -89,7 +95,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-tk python3-venv tk dpkg-dev fakeroot
+          sudo apt-get install -y python3 python3-venv python3-pip python3-tk tk \
+            dpkg-dev fakeroot
           /usr/bin/python3 -m venv .venv
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 

@@ -88,6 +88,27 @@ def archive(path: Path, tag: str) -> Path:
     return destination
 
 
+def verify_frozen_binary(target: Path) -> None:
+    """Fail the build when the frozen executable cannot even start.
+
+    Packaging success says nothing about whether the bundle can run: a mixed
+    Python 3.12 toolchain produces an executable that dies immediately with
+    ``No module named '_struct'`` while every build step reports success.
+    """
+    executable = target / ("risarms-ui.exe" if sys.platform == "win32" else "risarms-ui")
+    if not executable.is_file():
+        raise SystemExit(f"Expected frozen executable was not produced: {executable}")
+    result = subprocess.run(
+        [str(executable), "--version"], capture_output=True, text=True, timeout=120
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            "Frozen executable failed to start "
+            f"(exit {result.returncode}):\n{result.stdout}{result.stderr}"
+        )
+    print("Frozen executable reports:", result.stdout.strip())
+
+
 def native_installers(app_dir: Path, app_bundle: Path | None, machine: str) -> list:
     """Produce real platform installers; report what could not be built."""
     built = []
@@ -131,6 +152,7 @@ def main() -> int:
         )
         return 2
     run(sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", str(ROOT / "packaging" / "risarms-ui.spec"))
+    verify_frozen_binary(DIST / "RISARMS-Portal")
     machine = normalize_arch(platform.machine())
     tag = platform_tag(sys.platform, machine)
     if sys.platform == "darwin":
