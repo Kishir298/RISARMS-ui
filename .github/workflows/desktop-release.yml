@@ -136,6 +136,7 @@ jobs:
 
       - name: Mark validation-only artifacts
         if: inputs.validation_build
+        shell: bash
         run: |
           {
             echo "VALIDATION BUILD — DO NOT PUBLISH"
