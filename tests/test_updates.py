@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -165,7 +166,9 @@ def test_installer_command_does_not_use_a_shell(tmp_path):
     appimage = tmp_path / "RISARMS-Portal.AppImage"
     appimage.write_bytes(b"binary")
     assert updates.installer_command(appimage, "linux") == [str(appimage.resolve())]
-    assert appimage.stat().st_mode & 0o100
+    if os.name == "posix":
+        # Execute permission is a POSIX concept; Windows has no such mode bit.
+        assert appimage.stat().st_mode & 0o100
 
 
 def test_public_key_prefers_environment_and_bundle_over_override(monkeypatch):

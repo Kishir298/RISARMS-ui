@@ -5,8 +5,10 @@ import sys
 
 from PyInstaller.utils.hooks import collect_submodules
 
-ROOT = Path(SPECPATH).resolve().parent
-sys.path.insert(0, str(ROOT.parent))
+# SPECPATH is the directory containing this spec (packaging/).
+PACKAGING = Path(SPECPATH).resolve()
+ROOT = PACKAGING.parent
+sys.path.insert(0, str(ROOT))
 from risarms_ui import __version__  # noqa: E402
 
 HIDDEN = [
@@ -18,11 +20,11 @@ HIDDEN = [
     "keyring.backends.kwallet",
 ]
 HIDDEN += collect_submodules("keyring.backends")
-KEY = ROOT.parent / "risarms_ui" / "update_public_key.txt"
+KEY = ROOT / "risarms_ui" / "update_public_key.txt"
 
 a = Analysis(
-    [str(ROOT / "launcher.py")],
-    pathex=[str(ROOT.parent)],
+    [str(PACKAGING / "launcher.py")],
+    pathex=[str(ROOT)],
     binaries=[],
     datas=[(str(KEY), "risarms_ui")] if KEY.is_file() else [],
     hiddenimports=HIDDEN,

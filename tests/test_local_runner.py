@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from urllib.error import URLError
 
 import pytest
@@ -88,7 +89,8 @@ def test_local_runner_streams_without_core_client(monkeypatch):
 def test_local_runner_passes_approval_environment(tmp_path):
     root = tmp_path / "ascs"
     (root / "agent").mkdir(parents=True)
-    python = root / ".venv" / "bin" / "python"
+    # The runner resolves the venv interpreter per platform; mirror that here.
+    python = root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     python.parent.mkdir(parents=True)
     python.write_text("")
 
