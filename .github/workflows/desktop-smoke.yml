@@ -79,15 +79,21 @@ jobs:
 
       - name: Launch the GUI under a headless X server
         run: |
-          set -uo pipefail
-          xvfb-run -a timeout 20 risarms-ui --no-auto-connect >/tmp/gui.log 2>&1
-          status=$?
+          # The runner prepends `set -e`, so the timed command runs as an `if`
+          # condition; otherwise the expected 124 would abort the step.
+          if xvfb-run -a timeout 20 risarms-ui --no-auto-connect >/tmp/gui.log 2>&1; then
+            cat /tmp/gui.log
+            echo "GUI exited by itself instead of staying open"
+            exit 1
+          else
+            status=$?
+          fi
           cat /tmp/gui.log
           if [ "$status" -eq 124 ]; then
             echo "GUI stayed up until the 20s timeout under Xvfb"
             exit 0
           fi
-          echo "GUI exited with status $status instead of staying open"
+          echo "GUI failed with status $status"
           exit 1
 
   messaging-e2e:
