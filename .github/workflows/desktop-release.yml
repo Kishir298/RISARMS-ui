@@ -2,6 +2,13 @@ name: desktop-release
 
 on:
   workflow_dispatch:
+    inputs:
+      validation_build:
+        description: >-
+          Generate an ephemeral update key so installers can be validated.
+          Produces clearly marked, non-publishable artifacts.
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -108,10 +115,11 @@ jobs:
           python -m ruff check --select E9,F,I risarms_ui tests packaging
           python -m pytest -q --tb=short
 
-      - name: Embed production update public key
+      - name: Resolve update public key
         env:
           UPDATE_PUBLIC_KEY: ${{ vars.UPDATE_PUBLIC_KEY || secrets.UPDATE_PUBLIC_KEY }}
-        run: python packaging/embed_update_key.py
+          RISARMS_VALIDATION_BUILD: ${{ inputs.validation_build && '1' || '' }}
+        run: python packaging/resolve_update_key.py
 
       - name: Verify Tk for the build interpreter
         run: python -c "import tkinter; print('Tk', tkinter.TkVersion)"
@@ -120,6 +128,19 @@ jobs:
         run: |
           python packaging/build.py
           python packaging/sbom.py --output "dist/sbom-${{ matrix.platform }}.cdx.json" --version "${{ needs.validate.outputs.version }}"
+
+      - name: Mark validation-only artifacts
+        if: inputs.validation_build
+        run: |
+          {
+            echo "VALIDATION BUILD — DO NOT PUBLISH"
+            echo
+            echo "These installers were built with an ephemeral Ed25519 update key"
+            echo "(fingerprint ${RISARMS_UPDATE_KEY_FINGERPRINT}) because no production"
+            echo "UPDATE_PUBLIC_KEY is configured. They are unsigned by Apple or"
+            echo "Microsoft, no signed update manifest was produced, and they must not"
+            echo "be distributed."
+          } > "dist/RISARMS-Portal-VALIDATION-ONLY-${{ matrix.platform }}.txt"
 
       - name: Upload per-platform artifacts
         uses: actions/upload-artifact@v4
