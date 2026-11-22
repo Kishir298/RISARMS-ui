@@ -169,6 +169,8 @@ def build_windows_msi(app_dir: Path, version: str, output: Path) -> Path | None:
         "<Product Id=\"*\" Name=\"RISARMS Portal\" Language=\"1033\" Version=\""
         + version + "\" Manufacturer=\"RISARMS\" UpgradeCode=\"7c7b6f8e-3f37-4a1e-9b3c-6f0d5a2e9c11\">\n"
         "<Package InstallerVersion=\"500\" Compressed=\"yes\" InstallScope=\"perMachine\"/>\n"
+        # heat's components reference Media 1, which only the Product defines.
+        "<Media Id=\"1\" Cabinet=\"product.cab\" EmbedCab=\"yes\"/>\n"
         "<Directory Id=\"TARGETDIR\" Name=\"SourceDir\"><Directory Id=\"ProgramFilesFolder\">\n"
         "<Directory Id=\"INSTALLDIR\" Name=\"RISARMS Portal\"/></Directory></Directory>\n"
         "<Feature Id=\"DefaultFeature\" Title=\"RISARMS Portal\" Level=\"1\">\n"

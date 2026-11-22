@@ -49,3 +49,9 @@ def test_windows_msi_links_product_and_fragment(tmp_path, monkeypatch):
         "risarms-portal.wixobj",
         "risarms-portal-fragment.wixobj",
     }
+
+    # The harvested components reference Media 1; only the Product can define
+    # it, otherwise light fails with LGHT0094.
+    project = (tmp_path / "risarms-portal.wixproj.wxs").read_text(encoding="utf-8")
+    assert '<Media Id="1"' in project
+    assert "<Product " in project
