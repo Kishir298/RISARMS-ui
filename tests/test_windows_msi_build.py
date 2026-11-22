@@ -17,6 +17,33 @@ def load_installers():
     return module
 
 
+def test_windows_exe_writes_beside_the_artifacts(tmp_path, monkeypatch):
+    """Inno Setup 6 defaults to dist/Output; the build must pin OutputDir."""
+    installers = load_installers()
+    monkeypatch.setattr(
+        installers.shutil,
+        "which",
+        lambda name: "/fake/iscc" if name.lower() == "iscc" else None,
+    )
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "risarms-ui.exe").write_bytes(b"exe")
+    output = tmp_path / "RISARMS-Portal-0.6.0-windows-x86_64-setup.exe"
+    scripts: list[str] = []
+
+    def fake_run(command, cwd=None):
+        script = Path(command[-1])
+        scripts.append(script.read_text(encoding="utf-8"))
+        produced = script.parent / "RISARMS-Portal-Setup.exe"
+        produced.write_bytes(b"setup")
+
+    monkeypatch.setattr(installers, "_run", fake_run)
+
+    assert installers.build_windows_exe(app_dir, "0.6.0", output) == output
+    assert output.read_bytes() == b"setup"
+    assert f"OutputDir={output.parent}" in scripts[0]
+
+
 def test_windows_msi_links_product_and_fragment(tmp_path, monkeypatch):
     installers = load_installers()
     tools = {name: f"/fake/{name}" for name in ("candle", "light", "heat")}

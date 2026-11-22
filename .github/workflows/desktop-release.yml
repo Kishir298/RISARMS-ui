@@ -151,9 +151,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: risarms-desktop-${{ matrix.platform }}
+          # Explicit patterns: a bare dist/* would also upload WiX intermediates.
           path: |
-            dist/RISARMS-Portal-*
-            dist/risarms-portal_*
+            dist/RISARMS-Portal-*.zip
+            dist/RISARMS-Portal-*.dmg
+            dist/RISARMS-Portal-*.tar.gz
+            dist/RISARMS-Portal-*.AppImage
+            dist/RISARMS-Portal-*-setup.exe
+            dist/RISARMS-Portal-*.msi
+            dist/risarms-portal_*.deb
+            dist/RISARMS-Portal-VALIDATION-ONLY-*.txt
             dist/SHA256SUMS-*
             dist/sbom-*.cdx.json
           if-no-files-found: error

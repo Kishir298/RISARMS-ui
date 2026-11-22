@@ -124,12 +124,15 @@ def build_windows_exe(app_dir: Path, version: str, output: Path) -> Path | None:
         print("Inno Setup (iscc) is unavailable; skipping the EXE installer.")
         return None
     script = output.parent / "risarms-portal.iss"
+    # Inno Setup 6 defaults OutputDir to an "Output" subdirectory of the script;
+    # write beside the other artifacts instead.
     script.write_text(
         "[Setup]\n"
         "AppName=RISARMS Portal\n"
         f"AppVersion={version}\n"
         "DefaultDirName={autopf}\\RISARMS Portal\n"
         "DefaultGroupName=RISARMS\n"
+        f"OutputDir={output.parent}\n"
         "OutputBaseFilename=RISARMS-Portal-Setup\n"
         "Compression=lzma2\nSolidCompression=yes\n"
         "[Files]\n"
@@ -145,6 +148,11 @@ def build_windows_exe(app_dir: Path, version: str, output: Path) -> Path | None:
     produced = output.parent / "RISARMS-Portal-Setup.exe"
     if produced.exists() and produced != output:
         produced.replace(output)
+    if not output.exists():
+        print(
+            "Inno Setup did not produce the expected installer; "
+            f"looked for {produced} and {output}."
+        )
     return output if output.exists() else None
 
 

@@ -155,10 +155,12 @@ def main() -> int:
     app_dir = DIST / "RISARMS-Portal"
     artifacts = [destination] + native_installers(app_dir, app_bundle, machine)
     sums = DIST / f"SHA256SUMS-{tag}"
-    sums.write_text("", encoding="utf-8")
+    # newline="\n" keeps the checksum file LF-only on Windows so it verifies
+    # with sha256sum -c on Linux and macOS.
+    sums.write_text("", encoding="utf-8", newline="\n")
     for artifact in artifacts:
         digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-        with sums.open("a", encoding="utf-8") as file:
+        with sums.open("a", encoding="utf-8", newline="\n") as file:
             file.write(f"{digest}  {artifact.name}\n")
         print(f"Artifact: {artifact}")
         print(f"SHA-256: {digest}")
