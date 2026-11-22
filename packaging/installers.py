@@ -176,9 +176,14 @@ def build_windows_msi(app_dir: Path, version: str, output: Path) -> Path | None:
         "</Product>\n</Wix>\n",
         encoding="utf-8",
     )
-    obj = output.parent / "risarms-portal.wixobj"
-    _run([candle, "-dSourceDir=" + str(app_dir), "-out", str(obj), str(wxs)])
+    # ``heat`` produces a ComponentGroup fragment without a Product element,
+    # so both the fragment and the authored project must be compiled and the
+    # linker needs both objects.
+    fragment_obj = output.parent / "risarms-portal-fragment.wixobj"
+    project_obj = output.parent / "risarms-portal.wixobj"
+    _run([candle, "-dSourceDir=" + str(app_dir), "-out", str(fragment_obj), str(wxs)])
+    _run([candle, "-dSourceDir=" + str(app_dir), "-out", str(project_obj), str(project)])
     if output.exists():
         output.unlink()
-    _run([light, "-out", str(output), str(obj)])
+    _run([light, "-out", str(output), str(project_obj), str(fragment_obj)])
     return output if output.exists() else None

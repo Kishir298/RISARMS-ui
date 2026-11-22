@@ -124,8 +124,13 @@ jobs:
       - name: Verify Tk for the build interpreter
         run: python -c "import tkinter; print('Tk', tkinter.TkVersion)"
 
+      # bash fails on the first non-zero command; the default pwsh step would
+      # only propagate the exit code of the last command and could mask a
+      # failed installer build.
       - name: Build artifacts and native installers
+        shell: bash
         run: |
+          set -euo pipefail
           python packaging/build.py
           python packaging/sbom.py --output "dist/sbom-${{ matrix.platform }}.cdx.json" --version "${{ needs.validate.outputs.version }}"
 
