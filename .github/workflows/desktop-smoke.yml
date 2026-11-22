@@ -1,0 +1,116 @@
+name: desktop-smoke
+
+# Verifies what packaging alone cannot: that a desktop-release artifact really
+# installs, that the installed GUI process starts and stays up, and that the
+# client wire protocol still works against a real CORE server at the revision
+# the server release pins. It consumes an existing desktop-release run instead
+# of rebuilding, so it can be re-run for any artifact set.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "desktop-release run id whose Linux artifact to verify"
+        required: true
+  workflow_call:
+    inputs:
+      run_id:
+        description: "desktop-release run id whose Linux artifact to verify"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  linux-install:
+    name: Install the Linux artifact and launch the GUI
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download the Linux artifact from the release run
+        uses: actions/download-artifact@v4
+        with:
+          name: risarms-desktop-linux-x86_64
+          path: artifacts
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify the published checksums
+        run: |
+          set -euo pipefail
+          ls -l artifacts
+          cd artifacts
+          sums=$(find . -maxdepth 1 -name 'SHA256SUMS-*' -print -quit)
+          test -n "$sums" || { echo "no checksum file in the artifact"; exit 1; }
+          sha256sum -c "$sums"
+
+      - name: Install the Debian package with its dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          deb=$(find artifacts -name '*.deb' -print -quit)
+          test -n "$deb" || { echo "no .deb in the artifact"; exit 1; }
+          sudo apt-get install -y "$(realpath "$deb")"
+          dpkg-query -W -f='${Package} ${Version}\n' risarms-portal
+
+      - name: Check the installed binary reports its version
+        run: risarms-ui --version
+
+      - name: Check the installed binary passes its dependency doctor
+        run: risarms-ui --doctor
+
+      - name: Launch the GUI under a headless X server
+        run: |
+          set -uo pipefail
+          xvfb-run -a timeout 20 risarms-ui --no-auto-connect >/tmp/gui.log 2>&1
+          status=$?
+          cat /tmp/gui.log
+          if [ "$status" -eq 124 ]; then
+            echo "GUI stayed up until the 20s timeout under Xvfb"
+            exit 0
+          fi
+          echo "GUI exited with status $status instead of staying open"
+          exit 1
+
+  messaging-e2e:
+    name: Message flow against a real CORE server
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the desktop application
+        uses: actions/checkout@v4
+
+      - name: Resolve the CORE-HOST revision pinned by the server release
+        id: pin
+        run: |
+          python - <<'PY' >>"$GITHUB_OUTPUT"
+          import json
+          import urllib.request
+
+          url = "https://raw.githubusercontent.com/Kishir298/RISARMS-HOST/main/components.lock.json"
+          with urllib.request.urlopen(url, timeout=30) as response:
+              lock = json.load(response)
+          print("revision=" + lock["components"]["core-host"]["revision"])
+          PY
+
+      - name: Check out CORE-HOST at the pinned revision
+        uses: actions/checkout@v4
+        with:
+          repository: Kishir298/CORE-HOST
+          ref: ${{ steps.pin.outputs.revision }}
+          path: CORE-HOST
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install both packages
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]" -e ./CORE-HOST
+
+      - name: Run the messaging end-to-end test
+        env:
+          RISARMS_CORE_HOST: ${{ github.workspace }}/CORE-HOST
+        run: python -m pytest tests/integration/test_core_messaging_e2e.py -q --tb=short
